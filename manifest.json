@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "ThunderFox Audio Enhancer",
+  "version": "0.1.0",
+  "description": "Process web audio with a multiband compressor and limiter.",
+  "action": {
+    "default_title": "ThunderFox Audio Enhancer",
+    "default_popup": "popup/popup.html"
+  },
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "icons": {
+    "48": "icons/icon-48.png",
+    "96": "icons/icon-96.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ]
+}
+
+
