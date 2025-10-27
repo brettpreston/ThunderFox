@@ -2,7 +2,6 @@ const toggle = document.getElementById('toggle');
 const statusEl = document.getElementById('status');
 const hpToggle = document.getElementById('hpToggle');
 const limiterThreshold = document.getElementById('limiterThreshold');
-const limiterValue = document.getElementById('limiterValue');
 
 function setStatus(enabled) {
     statusEl.textContent = enabled ? 'Enabled' : 'Disabled';
@@ -13,8 +12,7 @@ async function init() {
     toggle.checked = !!enabled;
     setStatus(!!enabled);
     hpToggle.checked = !!hpEnabled;
-    limiterThreshold.value = String(limiterThDb);
-    limiterValue.textContent = `${limiterThDb} dB`;
+    limiterThreshold.value = String(-limiterThDb);
 }
 
 toggle.addEventListener('change', async () => {
@@ -43,8 +41,7 @@ hpToggle.addEventListener('change', async () => {
 });
 
 limiterThreshold.addEventListener('input', async () => {
-    const th = Number(limiterThreshold.value);
-    limiterValue.textContent = `${th} dB`;
+    const th = -Number(limiterThreshold.value);
     await browser.storage.local.set({ limiterThreshold: th });
     const tabs = await browser.tabs.query({ active: true, currentWindow: true });
     if (tabs[0]) {

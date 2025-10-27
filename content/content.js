@@ -260,8 +260,20 @@
         if (STATE.mediaElToNodes.has(mediaEl)) return;
         ensureAudioContext();
 
-        const source = STATE.audioContext.createMediaElementSource(mediaEl);
+        // Check for encrypted media
+        if (mediaEl.mediaKeys || mediaEl.mediaKeys !== null || mediaEl.encrypted || mediaEl.hasAttribute('data-eme')) {
+            console.log('ThunderFox: DRM protected content detected, bypassing audio processing');
+            return; // Skip processing for DRM content
+        }
 
+        let source;
+        try {
+            source = STATE.audioContext.createMediaElementSource(mediaEl);
+        } catch (error) {
+            console.log('ThunderFox: Unable to access media element audio:', error);
+            return;
+        }
+            
         // Pre-gain boost to ensure sufficient signal level
         const preGain = STATE.audioContext.createGain();
         preGain.gain.value = 1.0; // no extra pre-boost to avoid forcing limiter
@@ -344,7 +356,7 @@
     async function init() {
         const { enabled, limiterThreshold } = await browser.storage.local.get({ enabled: true, limiterThreshold: 0 });
         STATE.enabled = !!enabled;
-        STATE.limiterThresholdDb = typeof limiterThreshold === 'number' ? limiterThreshold : -3;
+        STATE.limiterThresholdDb = typeof limiterThreshold === 'number' ? limiterThreshold : -6; // default threshold
 
         // Wire existing media elements
         document.querySelectorAll('audio, video').forEach(wireMediaElement);
