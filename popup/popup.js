@@ -8,7 +8,7 @@ function setStatus(enabled) {
 }
 
 async function init() {
-    const { enabled, hpEnabled, limiterThreshold: limiterThDb } = await browser.storage.local.get({ enabled: true, hpEnabled: true, limiterThreshold: -3 });
+    const { enabled, hpEnabled, limiterThreshold: limiterThDb } = await browser.storage.local.get({ enabled: true, hpEnabled: false, limiterThreshold: -6 });
     toggle.checked = !!enabled;
     setStatus(!!enabled);
     hpToggle.checked = !!hpEnabled;

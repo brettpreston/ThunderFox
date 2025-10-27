@@ -14,7 +14,7 @@
         if (!STATE.audioContext) {
             STATE.audioContext = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
             STATE.masterGain = STATE.audioContext.createGain();
-            STATE.masterGain.gain.value = 10.0; // it's loud AF
+            STATE.masterGain.gain.value = 5.0; // it's loud AF
             // Final limiter
             STATE.limiter = createLimiter(STATE.audioContext);
             // Highpass filter placed after multiband output and before limiter
@@ -38,14 +38,14 @@
         comp.knee.value = 0;
         comp.ratio.value = 20; // brickwall-ish
         comp.attack.value = 0.001; // Faster attack for better limiting
-        comp.release.value = 0.05; // Faster release for more aggressive limiting
+        comp.release.value = 0.1; // Faster release for more aggressive limiting
 
         // Gain compensation node
         const compensation = ctx.createGain();
         compensation.gain.value = 1.0;
 
         const ceiling = ctx.createGain();
-        ceiling.gain.value = 1.0;
+        ceiling.gain.value = 0.99;
 
         input.connect(comp);
         comp.connect(compensation);
