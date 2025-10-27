@@ -52,6 +52,6 @@ Notes:
 
 AGPL3
 
-## Limks
+## Links
 https://brettpreston.github.io
 https://github.com/brettpreston
