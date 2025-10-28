@@ -1,6 +1,8 @@
-# ThunderFox - Loudness Normalizer by 7nihilate
+# ThunderFox — Loudness Normalizer
 
-Is the dialogue too quiet in the movie you're watching? Are the explosions too loud? This extension will even out the audio levels, ensuring a more predictable listening experience. ThunderFox is a lightweight Firefox extension that applies loudness maximization to media elements (audio and video) on web pages.
+Is the dialogue too quiet in the movie you're watching? And are the explosions too loud? This extension will even out the audio levels, ensuring a more predictable listening experience. ThunderFox is a lightweight Firefox extension that applies loudness maximization to media elements (audio and video) on web pages.
+
+This addon may not work on websites that stream DRM controlled content.
 
 ## Features
 
@@ -20,8 +22,8 @@ Is the dialogue too quiet in the movie you're watching? Are the explosions too l
 
 1. Click the ThunderFox toolbar icon to open the popup.
 2. Toggle the main switch to enable processing for the active tab.
-3. Toggle "Highpass (100 Hz) On" to insert/remove a 100 Hz (approx.) highpass filter after the multiband summing stage but before the limiter.
-4. Adjust the "Limiter Threshold" slider to set the limiter threshold in dB. Lowering the threshold causes the internal gain compensation to increase so peaks are pushed toward 0 dB (maximizing loudness).
+3. Toggle "Highpass On" to insert/remove a 100 Hz (approx.) highpass filter after the multiband summing stage but before the limiter.
+4. Adjust the "Loudness" slider to set the limiter threshold. Moving the threshold causes the internal gain compensation to increase so peaks are pushed toward 0 dB (maximizing loudness).
 
 Notes:
 - The popup persists settings to `browser.storage.local` and messages the content script to apply changes in the active tab.
@@ -51,7 +53,3 @@ Notes:
 ## License
 
 AGPL3
-
-## Links
-https://brettpreston.github.io
-https://github.com/brettpreston
