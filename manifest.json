@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ThunderFox Audio Enhancer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Process web audio with a multiband compressor and limiter.",
   "action": {
     "default_title": "ThunderFox Audio Enhancer",

@@ -17,7 +17,7 @@
             STATE.masterGain.gain.value = 5.0; // it's loud AF
             // Final limiter
             STATE.limiter = createLimiter(STATE.audioContext);
-            // Highpass filter placed after multiband output and before limiter
+            // Highpass filter placed after multiband output but before limiter
             const hp = STATE.audioContext.createBiquadFilter();
             hp.type = 'highpass';
             hp.frequency.value = 200;
@@ -38,7 +38,7 @@
         comp.knee.value = 0;
         comp.ratio.value = 20; // brickwall-ish
         comp.attack.value = 0.001; // Faster attack for better limiting
-        comp.release.value = 0.1; // Faster release for more aggressive limiting
+        comp.release.value = 0.1; // Faster release for aggressive limiting
 
         // Gain compensation node
         const compensation = ctx.createGain();
@@ -385,26 +385,56 @@
         // Listen for control messages
         browser.runtime.onMessage.addListener((msg) => {
             if (msg && msg.type === 'THUNDERFOX_TOGGLE') {
-                STATE.enabled = !!msg.enabled;
-                applyEnabledStateAll();
-                return;
+                    console.debug('ThunderFox: received THUNDERFOX_TOGGLE', msg);
+                    STATE.enabled = !!msg.enabled;
+                    applyEnabledStateAll();
+                    return;
             }
             if (msg && msg.type === 'THUNDERFOX_HP_TOGGLE') {
-                const en = !!msg.enabled;
-                applyHighpassState(en);
-                return;
+                    console.debug('ThunderFox: received THUNDERFOX_HP_TOGGLE', msg);
+                    const en = !!msg.enabled;
+                    applyHighpassState(en);
+                    return;
             }
             if (msg && msg.type === 'THUNDERFOX_LIMITER_THRESHOLD') {
-                const th = typeof msg.threshold === 'number' ? msg.threshold : -3;
-                STATE.limiterThresholdDb = th;
-                if (STATE.limiter && STATE.limiter.comp) {
-                    STATE.limiter.comp.threshold.value = th;
-                }
-                updateLimiterCompensation(th);
-                return;
+                    console.debug('ThunderFox: received THUNDERFOX_LIMITER_THRESHOLD', msg);
+                    const th = typeof msg.threshold === 'number' ? msg.threshold : -3;
+                    STATE.limiterThresholdDb = th;
+                    if (STATE.limiter && STATE.limiter.comp) {
+                        STATE.limiter.comp.threshold.value = th;
+                    }
+                    updateLimiterCompensation(th);
+                    return;
             }
         });
 
+            // Also listen for storage changes so toggles take effect even if
+            // popup messaging to the active tab fails (e.g. different window/tab)
+            browser.storage.onChanged.addListener((changes, area) => {
+                if (area !== 'local') return;
+                try {
+                    if (changes.enabled) {
+                        console.debug('ThunderFox: storage changed enabled ->', changes.enabled.newValue);
+                        STATE.enabled = !!changes.enabled.newValue;
+                        applyEnabledStateAll();
+                    }
+                    if (changes.hpEnabled) {
+                        console.debug('ThunderFox: storage changed hpEnabled ->', changes.hpEnabled.newValue);
+                        applyHighpassState(!!changes.hpEnabled.newValue);
+                    }
+                    if (changes.limiterThreshold) {
+                        console.debug('ThunderFox: storage changed limiterThreshold ->', changes.limiterThreshold.newValue);
+                        const th = typeof changes.limiterThreshold.newValue === 'number' ? changes.limiterThreshold.newValue : -3;
+                        STATE.limiterThresholdDb = th;
+                        if (STATE.limiter && STATE.limiter.comp) {
+                            STATE.limiter.comp.threshold.value = th;
+                        }
+                        updateLimiterCompensation(th);
+                    }
+                } catch (e) {
+                    console.error('ThunderFox: error handling storage.onChanged', e, changes);
+                }
+            });
         // Apply initial limiter threshold
         if (STATE.limiter && STATE.limiter.comp) {
             STATE.limiter.comp.threshold.value = STATE.limiterThresholdDb;
@@ -416,7 +446,7 @@
         applyHighpassState(!!hpEnabled);
     }
 
-    // Kickoff
+    // Fire up the bass cannon
     init().catch(() => {});
 })();
 
