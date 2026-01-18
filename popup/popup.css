@@ -1,13 +1,21 @@
 :root {
   color-scheme: light dark;
 }
+* {
+  box-sizing: border-box;
+}
 body {
   margin: 0;
   font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
   width: 260px;
+  overflow-x: hidden;
+  box-sizing: border-box;
 }
 .container {
   padding: 12px 14px;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 260px;
 }
 h1 {
   margin: 0 0 12px 0;
@@ -28,9 +36,11 @@ h1 {
   align-items: center;
   gap: 8px;
   font-size: 12px;
+  min-width: 0;
 }
 .row input[type="range"] {
   flex: 1;
+  min-width: 0;
 }
 .value {
   width: 44px;
@@ -66,6 +76,96 @@ input:checked + .slider {
 }
 input:checked + .slider:before {
   transform: translateX(20px);
+}
+
+/* EQ Section */
+.eq-section {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(0, 0, 0, 0.1);
+  width: 100%;
+  box-sizing: border-box;
+}
+
+@media (prefers-color-scheme: dark) {
+  .eq-section {
+    border-top-color: rgba(255, 255, 255, 0.1);
+  }
+}
+
+.eq-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.eq-title {
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.9;
+}
+
+.eq-reset-btn {
+  font-size: 11px;
+  padding: 4px 8px;
+  border: 1px solid rgba(0, 0, 0, 0.2);
+  border-radius: 4px;
+  background-color: transparent;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 0.2s;
+}
+
+.eq-reset-btn:hover {
+  opacity: 1;
+}
+
+@media (prefers-color-scheme: dark) {
+  .eq-reset-btn {
+    border-color: rgba(255, 255, 255, 0.2);
+    color: inherit;
+  }
+}
+
+.eq-bands {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.eq-band {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  min-width: 0;
+}
+
+.eq-label {
+  width: 45px;
+  text-align: left;
+  font-size: 11px;
+  opacity: 0.8;
+  flex-shrink: 0;
+}
+
+.eq-slider {
+  flex: 1;
+  height: 4px;
+  min-width: 0;
+}
+
+.eq-value {
+  width: 36px;
+  text-align: right;
+  font-size: 10px;
+  font-family: monospace;
+  opacity: 0.7;
+  flex-shrink: 0;
 }
 
 

@@ -7,7 +7,9 @@
         enabled: true,
         observer: null,
         limiterThresholdDb: 0,
-        hpEnabled: true
+        hpEnabled: false,
+        eq: null,
+        eqGains: [0, 0, 0, 0, 0, 0, 0, 0] // 8 bands, default 0 dB
     };
 
     function ensureAudioContext() {
@@ -17,18 +19,59 @@
             STATE.masterGain.gain.value = 5.0; // it's loud AF
             // Final limiter
             STATE.limiter = createLimiter(STATE.audioContext);
-            // Highpass filter placed after multiband output but before limiter
-            const hp = STATE.audioContext.createBiquadFilter();
-            hp.type = 'highpass';
-            hp.frequency.value = 200;
-            hp.Q.value = 0.707;
-            STATE.hpFilter = hp;
+            // Highpass filter placed after multiband output but before limiter (biquad, 100Hz)
+            STATE.hpFilter = createBiquadHighpass(STATE.audioContext, 200);
+            // 8-band equalizer before limiter
+            STATE.eq = create8BandEQ(STATE.audioContext);
 
-            // Wire master gain -> highpass -> limiter -> destination
-            STATE.masterGain.connect(STATE.hpFilter);
-            STATE.hpFilter.connect(STATE.limiter.input);
+            // Wire DSP chain: masterGain -> highpass -> EQ -> limiter -> destination
+            // IMPORTANT: EQ must be before limiter in the chain
+            // Note: hpFilter is bypassed by default (hpEnabled: false)
+            STATE.masterGain.connect(STATE.eq.input);
+            STATE.eq.output.connect(STATE.limiter.input); // EQ feeds into limiter
             STATE.limiter.output.connect(STATE.audioContext.destination);
         }
+    }
+
+    function create8BandEQ(ctx) {
+        // Standard 8-band EQ frequencies (Hz)
+        const frequencies = [60, 170, 310, 600, 1000, 3000, 6000, 12000];
+        const Q = 1.0; // Quality factor for reasonable bandwidth
+        
+        const input = ctx.createGain();
+        const filters = [];
+        
+        // Create 8 peaking filters in series
+        let currentNode = input;
+        frequencies.forEach((freq, index) => {
+            const filter = ctx.createBiquadFilter();
+            filter.type = 'peaking';
+            filter.frequency.value = freq;
+            filter.Q.value = Q;
+            filter.gain.value = 0; // Default to 0 dB (no boost/cut)
+            
+            currentNode.connect(filter);
+            currentNode = filter;
+            filters.push(filter);
+        });
+        
+        return {
+            input,
+            output: currentNode,
+            filters,
+            setGain: (bandIndex, gainDb) => {
+                if (bandIndex >= 0 && bandIndex < filters.length) {
+                    filters[bandIndex].gain.value = gainDb;
+                }
+            },
+            setGains: (gainsDb) => {
+                gainsDb.forEach((gainDb, index) => {
+                    if (index < filters.length) {
+                        filters[index].gain.value = gainDb;
+                    }
+                });
+            }
+        };
     }
 
     function createLimiter(ctx) {
@@ -55,28 +98,32 @@
     }
 
     function applyHighpassState(enabled) {
-        if (!STATE.audioContext || !STATE.masterGain || !STATE.limiter) return;
+        if (!STATE.audioContext || !STATE.masterGain || !STATE.limiter || !STATE.eq) return;
         STATE.hpEnabled = !!enabled;
         try {
             // Disconnect existing masterGain outputs to avoid duplicate connections
             STATE.masterGain.disconnect();
         } catch (_) {}
 
+        // Ensure EQ → limiter connection is maintained (EQ must be before limiter)
+        try {
+            STATE.eq.output.disconnect();
+        } catch (_) {}
+        STATE.eq.output.connect(STATE.limiter.input);
+
         if (STATE.hpEnabled) {
             // Ensure hp filter exists
             if (!STATE.hpFilter) {
-                const hp = STATE.audioContext.createBiquadFilter();
-                hp.type = 'highpass';
-                hp.frequency.value = 100;
-                hp.Q.value = 0.707;
-                STATE.hpFilter = hp;
+                STATE.hpFilter = createBiquadHighpass(STATE.audioContext, 100);
             }
             STATE.masterGain.connect(STATE.hpFilter);
             try { STATE.hpFilter.disconnect(); } catch (_) {}
-            STATE.hpFilter.connect(STATE.limiter.input);
+            // Chain: masterGain → highpass → EQ → limiter
+            STATE.hpFilter.connect(STATE.eq.input);
         } else {
-            // Bypass highpass: connect master gain directly into limiter input
-            STATE.masterGain.connect(STATE.limiter.input);
+            // Bypass highpass: connect master gain directly into EQ input
+            // Chain: masterGain → EQ → limiter
+            STATE.masterGain.connect(STATE.eq.input);
         }
     }
 
@@ -140,56 +187,41 @@
         return coefficients;
     }
 
+    function createBiquadHighpass(ctx, cutoffHz) {
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'highpass';
+        filter.frequency.value = cutoffHz;
+        filter.Q.value = 1.0; // Quality factor
+        
+        return filter;
+    }
+
     function createLinearPhaseBandpass(ctx, lowHz, highHz) {
         const sampleRate = ctx.sampleRate;
         
-        try {
-            // Generate lowpass filter for high frequency cutoff
-            const lowpassCoeffs = generateFIRFilter(sampleRate, 'lowpass', highHz);
-            const lowpassConvolver = ctx.createConvolver();
-            const lowpassBuffer = ctx.createBuffer(1, lowpassCoeffs.length, sampleRate);
-            lowpassBuffer.copyToChannel(lowpassCoeffs, 0);
-            lowpassConvolver.buffer = lowpassBuffer;
-            
-            // Generate highpass filter for low frequency cutoff
-            const highpassCoeffs = generateFIRFilter(sampleRate, 'highpass', lowHz);
-            const highpassConvolver = ctx.createConvolver();
-            const highpassBuffer = ctx.createBuffer(1, highpassCoeffs.length, sampleRate);
-            highpassBuffer.copyToChannel(highpassCoeffs, 0);
-            highpassConvolver.buffer = highpassBuffer;
-            
-            // Chain highpass into lowpass to create a band-pass
-            highpassConvolver.connect(lowpassConvolver);
-            
-            return { 
-                input: highpassConvolver, 
-                output: lowpassConvolver, 
-                first: highpassConvolver, 
-                last: lowpassConvolver 
-            };
-        } catch (error) {
-            console.error('Error creating linear phase bandpass:', error);
-            // Fallback to simple biquad filters if FIR fails
-            return createFallbackBandpass(ctx, lowHz, highHz);
-        }
-    }
-
-    function createFallbackBandpass(ctx, lowHz, highHz) {
-        // Fallback to biquad filters if FIR implementation fails
-        const lowpass = ctx.createBiquadFilter();
-        lowpass.type = 'lowpass';
-        lowpass.frequency.value = highHz;
-        lowpass.Q.value = 0.707;
-
-        const highpass = ctx.createBiquadFilter();
-        highpass.type = 'highpass';
-        highpass.frequency.value = lowHz;
-        highpass.Q.value = 0.707;
-
+        // Generate lowpass filter for high frequency cutoff
+        const lowpassCoeffs = generateFIRFilter(sampleRate, 'lowpass', highHz);
+        const lowpassConvolver = ctx.createConvolver();
+        const lowpassBuffer = ctx.createBuffer(1, lowpassCoeffs.length, sampleRate);
+        lowpassBuffer.copyToChannel(lowpassCoeffs, 0);
+        lowpassConvolver.buffer = lowpassBuffer;
+        
+        // Generate highpass filter for low frequency cutoff
+        const highpassCoeffs = generateFIRFilter(sampleRate, 'highpass', lowHz);
+        const highpassConvolver = ctx.createConvolver();
+        const highpassBuffer = ctx.createBuffer(1, highpassCoeffs.length, sampleRate);
+        highpassBuffer.copyToChannel(highpassCoeffs, 0);
+        highpassConvolver.buffer = highpassBuffer;
+        
         // Chain highpass into lowpass to create a band-pass
-        highpass.connect(lowpass);
-
-        return { input: highpass, output: lowpass, first: highpass, last: lowpass };
+        highpassConvolver.connect(lowpassConvolver);
+        
+        return { 
+            input: highpassConvolver, 
+            output: lowpassConvolver, 
+            first: highpassConvolver, 
+            last: lowpassConvolver 
+        };
     }
 
     function createBand(ctx, lowHz, highHz, makeupDb) {
@@ -354,9 +386,16 @@
     }
 
     async function init() {
-        const { enabled, limiterThreshold } = await browser.storage.local.get({ enabled: true, limiterThreshold: 0 });
+        const { enabled, limiterThreshold, eqGains } = await browser.storage.local.get({ 
+            enabled: true, 
+            limiterThreshold: 0,
+            eqGains: [0, 0, 0, 0, 0, 0, 0, 0]
+        });
         STATE.enabled = !!enabled;
         STATE.limiterThresholdDb = typeof limiterThreshold === 'number' ? limiterThreshold : -6; // default threshold
+        STATE.eqGains = Array.isArray(eqGains) && eqGains.length === 8 
+            ? eqGains.map(g => Math.max(-12, Math.min(12, typeof g === 'number' ? g : 0)))
+            : [0, 0, 0, 0, 0, 0, 0, 0];
 
         // Wire existing media elements
         document.querySelectorAll('audio, video').forEach(wireMediaElement);
@@ -406,6 +445,28 @@
                     updateLimiterCompensation(th);
                     return;
             }
+            if (msg && msg.type === 'THUNDERFOX_EQ_GAIN') {
+                    console.debug('ThunderFox: received THUNDERFOX_EQ_GAIN', msg);
+                    if (typeof msg.bandIndex === 'number' && typeof msg.gainDb === 'number') {
+                        const bandIndex = Math.max(0, Math.min(7, Math.floor(msg.bandIndex)));
+                        const gainDb = Math.max(-12, Math.min(12, msg.gainDb));
+                        STATE.eqGains[bandIndex] = gainDb;
+                        if (STATE.eq && STATE.eq.setGain) {
+                            STATE.eq.setGain(bandIndex, gainDb);
+                        }
+                    }
+                    return;
+            }
+            if (msg && msg.type === 'THUNDERFOX_EQ_GAINS') {
+                    console.debug('ThunderFox: received THUNDERFOX_EQ_GAINS', msg);
+                    if (Array.isArray(msg.gainsDb) && msg.gainsDb.length === 8) {
+                        STATE.eqGains = msg.gainsDb.map(g => Math.max(-12, Math.min(12, typeof g === 'number' ? g : 0)));
+                        if (STATE.eq && STATE.eq.setGains) {
+                            STATE.eq.setGains(STATE.eqGains);
+                        }
+                    }
+                    return;
+            }
         });
 
             // Also listen for storage changes so toggles take effect even if
@@ -431,6 +492,15 @@
                         }
                         updateLimiterCompensation(th);
                     }
+                    if (changes.eqGains) {
+                        console.debug('ThunderFox: storage changed eqGains ->', changes.eqGains.newValue);
+                        if (Array.isArray(changes.eqGains.newValue) && changes.eqGains.newValue.length === 8) {
+                            STATE.eqGains = changes.eqGains.newValue.map(g => Math.max(-12, Math.min(12, typeof g === 'number' ? g : 0)));
+                            if (STATE.eq && STATE.eq.setGains) {
+                                STATE.eq.setGains(STATE.eqGains);
+                            }
+                        }
+                    }
                 } catch (e) {
                     console.error('ThunderFox: error handling storage.onChanged', e, changes);
                 }
@@ -441,9 +511,15 @@
         }
         updateLimiterCompensation(STATE.limiterThresholdDb);
 
+        // Apply initial EQ gains
+        if (STATE.eq && STATE.eq.setGains) {
+            STATE.eq.setGains(STATE.eqGains);
+        }
+
         // Apply initial highpass state (from storage) and ensure wiring
-        const { hpEnabled } = await browser.storage.local.get({ hpEnabled: true });
-        applyHighpassState(!!hpEnabled);
+        const { hpEnabled } = await browser.storage.local.get({ hpEnabled: false });
+        STATE.hpEnabled = !!hpEnabled;
+        applyHighpassState(STATE.hpEnabled);
     }
 
     // Fire up the bass cannon

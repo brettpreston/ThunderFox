@@ -23,6 +23,54 @@
                 <span>Loudness</span>
                 <input id="limiterThreshold" type="range" min="0" max="20" step="1">
             </label>
+            <div class="eq-section">
+                <div class="eq-header">
+                    <div class="eq-title">Equalizer</div>
+                    <button id="eqReset" class="eq-reset-btn">Reset</button>
+                </div>
+                <div class="eq-bands">
+                    <div class="eq-band">
+                        <span class="eq-label">60Hz</span>
+                        <input id="eq0" type="range" min="-12" max="12" step="0.5" value="0" class="eq-slider">
+                        <span class="eq-value" id="eq0-value">0</span>
+                    </div>
+                    <div class="eq-band">
+                        <span class="eq-label">170Hz</span>
+                        <input id="eq1" type="range" min="-12" max="12" step="0.5" value="0" class="eq-slider">
+                        <span class="eq-value" id="eq1-value">0</span>
+                    </div>
+                    <div class="eq-band">
+                        <span class="eq-label">310Hz</span>
+                        <input id="eq2" type="range" min="-12" max="12" step="0.5" value="0" class="eq-slider">
+                        <span class="eq-value" id="eq2-value">0</span>
+                    </div>
+                    <div class="eq-band">
+                        <span class="eq-label">600Hz</span>
+                        <input id="eq3" type="range" min="-12" max="12" step="0.5" value="0" class="eq-slider">
+                        <span class="eq-value" id="eq3-value">0</span>
+                    </div>
+                    <div class="eq-band">
+                        <span class="eq-label">1kHz</span>
+                        <input id="eq4" type="range" min="-12" max="12" step="0.5" value="0" class="eq-slider">
+                        <span class="eq-value" id="eq4-value">0</span>
+                    </div>
+                    <div class="eq-band">
+                        <span class="eq-label">3kHz</span>
+                        <input id="eq5" type="range" min="-12" max="12" step="0.5" value="0" class="eq-slider">
+                        <span class="eq-value" id="eq5-value">0</span>
+                    </div>
+                    <div class="eq-band">
+                        <span class="eq-label">6kHz</span>
+                        <input id="eq6" type="range" min="-12" max="12" step="0.5" value="0" class="eq-slider">
+                        <span class="eq-value" id="eq6-value">0</span>
+                    </div>
+                    <div class="eq-band">
+                        <span class="eq-label">12kHz</span>
+                        <input id="eq7" type="range" min="-12" max="12" step="0.5" value="0" class="eq-slider">
+                        <span class="eq-value" id="eq7-value">0</span>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
     <script src="popup.js"></script>
