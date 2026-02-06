@@ -15,7 +15,7 @@ if (eqBands) {
 }
 
 const eqLabels = document.querySelectorAll('.eq-label');
-const freqLabels = ['60', '170', '310', '600', '1k', '3k', '6k', '12k'];
+const freqLabels = ['68', '150', '315', '680', '1.5k', '3k', '7k', '15k'];
 eqLabels.forEach((el, i) => {
     if (freqLabels[i]) el.textContent = freqLabels[i];
 });
@@ -263,9 +263,8 @@ function drawEQCurve() {
         const midY = (points[i].y + points[i+1].y) / 2;
         const cp1x = (points[i].x + midX) / 2;
         const cp1y = points[i].y; 
-        // Simple cubic spline approximation or Catmull-Rom could be used here.
-        // For a slider visualizer, a simple monotonic curve or tension spline is best.
-        // Let's use a tension spline logic for smoother fit:
+
+        // tension spline logic
         const p0 = points[Math.max(0, i - 1)];
         const p1 = points[i];
         const p2 = points[i + 1];

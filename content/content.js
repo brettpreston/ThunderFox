@@ -20,7 +20,7 @@
             STATE.masterGain.gain.value = 5.0; // it's loud AF
             // Final limiter
             STATE.limiter = createLimiter(STATE.audioContext);
-            // Highpass filter placed after multiband output but before limiter (biquad, 100Hz)
+            // Highpass filter placed after multiband output but before limiter (biquad, 200Hz)
             STATE.hpFilter = createBiquadHighpass(STATE.audioContext, 200);
             // 8-band equalizer before limiter
             STATE.eq = create8BandEQ(STATE.audioContext);
@@ -33,7 +33,7 @@
 
     function create8BandEQ(ctx) {
         // Standard 8-band EQ frequencies (Hz)
-        const frequencies = [60, 170, 310, 600, 1000, 3000, 6000, 12000];
+        const frequencies = [68, 147, 315, 678, 1464, 3153, 6787, 14635];
         const Q = 1.0; // Quality factor for reasonable bandwidth
         
         const input = ctx.createGain();
@@ -484,8 +484,8 @@
             }
         });
 
-            // Also listen for storage changes so toggles take effect even if
-            // popup messaging to the active tab fails (e.g. different window/tab)
+            // Listen for storage changes so toggles take effect even if
+            // Popup messaging to the active tab fails (e.g. different window/tab)
             browser.storage.onChanged.addListener((changes, area) => {
                 if (area !== 'local') return;
                 try {

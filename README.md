@@ -1,6 +1,6 @@
 # ThunderFox — Loudness Normalizer
 
-Is the dialogue too quiet in the movie you're watching? And are the explosions too loud? This extension will even out the audio levels, ensuring a more predictable listening experience. ThunderFox is a lightweight Firefox extension that applies loudness maximization to media elements (audio and video) on web pages.
+Is the dialogue too quiet in the movie you're watching? And are the explosions too loud? This extension will even out the audio levels, ensuring a more predictable listening experience. ThunderFox is a lightweight Firefox extension that applies loudness maximization to media elements (audio and video) on web pages. Additionally, a customizable EQ can be applied.
 
 This addon may not work on websites that stream DRM controlled content.
 
