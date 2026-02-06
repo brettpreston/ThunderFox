@@ -8,6 +8,7 @@
         observer: null,
         limiterThresholdDb: 0,
         hpEnabled: false,
+        eqEnabled: true,
         eq: null,
         eqGains: [0, 0, 0, 0, 0, 0, 0, 0] // 8 bands, default 0 dB
     };
@@ -24,11 +25,8 @@
             // 8-band equalizer before limiter
             STATE.eq = create8BandEQ(STATE.audioContext);
 
-            // Wire DSP chain: masterGain -> highpass -> EQ -> limiter -> destination
-            // IMPORTANT: EQ must be before limiter in the chain
-            // Note: hpFilter is bypassed by default (hpEnabled: false)
-            STATE.masterGain.connect(STATE.eq.input);
-            STATE.eq.output.connect(STATE.limiter.input); // EQ feeds into limiter
+            // Wire DSP chain
+            updateDSPChain();
             STATE.limiter.output.connect(STATE.audioContext.destination);
         }
     }
@@ -97,34 +95,39 @@
         return { input, output: ceiling, comp, compensation };
     }
 
-    function applyHighpassState(enabled) {
+    function updateDSPChain() {
         if (!STATE.audioContext || !STATE.masterGain || !STATE.limiter || !STATE.eq) return;
-        STATE.hpEnabled = !!enabled;
+        
+        // Disconnect all potential intermediate nodes to reset the chain
         try {
-            // Disconnect existing masterGain outputs to avoid duplicate connections
             STATE.masterGain.disconnect();
         } catch (_) {}
-
-        // Ensure EQ → limiter connection is maintained (EQ must be before limiter)
+        try {
+            if (STATE.hpFilter) STATE.hpFilter.disconnect();
+        } catch (_) {}
         try {
             STATE.eq.output.disconnect();
         } catch (_) {}
-        STATE.eq.output.connect(STATE.limiter.input);
 
+        let currentNode = STATE.masterGain;
+
+        // 1. Highpass Filter (Optional)
         if (STATE.hpEnabled) {
-            // Ensure hp filter exists
             if (!STATE.hpFilter) {
                 STATE.hpFilter = createBiquadHighpass(STATE.audioContext, 100);
             }
-            STATE.masterGain.connect(STATE.hpFilter);
-            try { STATE.hpFilter.disconnect(); } catch (_) {}
-            // Chain: masterGain → highpass → EQ → limiter
-            STATE.hpFilter.connect(STATE.eq.input);
-        } else {
-            // Bypass highpass: connect master gain directly into EQ input
-            // Chain: masterGain → EQ → limiter
-            STATE.masterGain.connect(STATE.eq.input);
+            currentNode.connect(STATE.hpFilter);
+            currentNode = STATE.hpFilter;
         }
+
+        // 2. Equalizer (Optional)
+        if (STATE.eqEnabled) {
+            currentNode.connect(STATE.eq.input);
+            currentNode = STATE.eq.output;
+        }
+
+        // 3. Limiter (Always last before destination)
+        currentNode.connect(STATE.limiter.input);
     }
 
     function generateFIRFilter(sampleRate, filterType, cutoffFreq, filterLength = 127) {
@@ -386,15 +389,19 @@
     }
 
     async function init() {
-        const { enabled, limiterThreshold, eqGains } = await browser.storage.local.get({ 
+        const { enabled, limiterThreshold, eqGains, eqEnabled, hpEnabled } = await browser.storage.local.get({ 
             enabled: true, 
             limiterThreshold: 0,
-            eqGains: [0, 0, 0, 0, 0, 0, 0, 0]
+            eqGains: [0, 0, 0, 0, 0, 0, 0, 0],
+            eqEnabled: true,
+            hpEnabled: false
         });
         STATE.enabled = !!enabled;
+        STATE.eqEnabled = eqEnabled !== undefined ? !!eqEnabled : true;
+        STATE.hpEnabled = !!hpEnabled;
         STATE.limiterThresholdDb = typeof limiterThreshold === 'number' ? limiterThreshold : -6; // default threshold
         STATE.eqGains = Array.isArray(eqGains) && eqGains.length === 8 
-            ? eqGains.map(g => Math.max(-12, Math.min(12, typeof g === 'number' ? g : 0)))
+            ? eqGains.map(g => Math.max(-18, Math.min(18, typeof g === 'number' ? g : 0)))
             : [0, 0, 0, 0, 0, 0, 0, 0];
 
         // Wire existing media elements
@@ -432,7 +439,15 @@
             if (msg && msg.type === 'THUNDERFOX_HP_TOGGLE') {
                     console.debug('ThunderFox: received THUNDERFOX_HP_TOGGLE', msg);
                     const en = !!msg.enabled;
-                    applyHighpassState(en);
+                    STATE.hpEnabled = en;
+                    updateDSPChain();
+                    return;
+            }
+            if (msg && msg.type === 'THUNDERFOX_EQ_TOGGLE') {
+                    console.debug('ThunderFox: received THUNDERFOX_EQ_TOGGLE', msg);
+                    const en = !!msg.enabled;
+                    STATE.eqEnabled = en;
+                    updateDSPChain();
                     return;
             }
             if (msg && msg.type === 'THUNDERFOX_LIMITER_THRESHOLD') {
@@ -449,7 +464,7 @@
                     console.debug('ThunderFox: received THUNDERFOX_EQ_GAIN', msg);
                     if (typeof msg.bandIndex === 'number' && typeof msg.gainDb === 'number') {
                         const bandIndex = Math.max(0, Math.min(7, Math.floor(msg.bandIndex)));
-                        const gainDb = Math.max(-12, Math.min(12, msg.gainDb));
+                        const gainDb = Math.max(-18, Math.min(18, msg.gainDb));
                         STATE.eqGains[bandIndex] = gainDb;
                         if (STATE.eq && STATE.eq.setGain) {
                             STATE.eq.setGain(bandIndex, gainDb);
@@ -460,7 +475,7 @@
             if (msg && msg.type === 'THUNDERFOX_EQ_GAINS') {
                     console.debug('ThunderFox: received THUNDERFOX_EQ_GAINS', msg);
                     if (Array.isArray(msg.gainsDb) && msg.gainsDb.length === 8) {
-                        STATE.eqGains = msg.gainsDb.map(g => Math.max(-12, Math.min(12, typeof g === 'number' ? g : 0)));
+                        STATE.eqGains = msg.gainsDb.map(g => Math.max(-18, Math.min(18, typeof g === 'number' ? g : 0)));
                         if (STATE.eq && STATE.eq.setGains) {
                             STATE.eq.setGains(STATE.eqGains);
                         }
@@ -481,7 +496,13 @@
                     }
                     if (changes.hpEnabled) {
                         console.debug('ThunderFox: storage changed hpEnabled ->', changes.hpEnabled.newValue);
-                        applyHighpassState(!!changes.hpEnabled.newValue);
+                        STATE.hpEnabled = !!changes.hpEnabled.newValue;
+                        updateDSPChain();
+                    }
+                    if (changes.eqEnabled) {
+                        console.debug('ThunderFox: storage changed eqEnabled ->', changes.eqEnabled.newValue);
+                        STATE.eqEnabled = !!changes.eqEnabled.newValue;
+                        updateDSPChain();
                     }
                     if (changes.limiterThreshold) {
                         console.debug('ThunderFox: storage changed limiterThreshold ->', changes.limiterThreshold.newValue);
@@ -495,7 +516,7 @@
                     if (changes.eqGains) {
                         console.debug('ThunderFox: storage changed eqGains ->', changes.eqGains.newValue);
                         if (Array.isArray(changes.eqGains.newValue) && changes.eqGains.newValue.length === 8) {
-                            STATE.eqGains = changes.eqGains.newValue.map(g => Math.max(-12, Math.min(12, typeof g === 'number' ? g : 0)));
+                            STATE.eqGains = changes.eqGains.newValue.map(g => Math.max(-18, Math.min(18, typeof g === 'number' ? g : 0)));
                             if (STATE.eq && STATE.eq.setGains) {
                                 STATE.eq.setGains(STATE.eqGains);
                             }
@@ -516,14 +537,10 @@
             STATE.eq.setGains(STATE.eqGains);
         }
 
-        // Apply initial highpass state (from storage) and ensure wiring
-        const { hpEnabled } = await browser.storage.local.get({ hpEnabled: false });
-        STATE.hpEnabled = !!hpEnabled;
-        applyHighpassState(STATE.hpEnabled);
+        // Apply initial routing
+        updateDSPChain();
     }
 
     // Fire up the bass cannon
     init().catch(() => {});
 })();
-
-

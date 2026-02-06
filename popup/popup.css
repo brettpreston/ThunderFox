@@ -179,6 +179,7 @@ input:checked + .slider:before {
   color: #888;
   margin-top: 4px;
   white-space: nowrap;
+  text-align: center;
 }
 
 .eq-value {
@@ -188,6 +189,11 @@ input:checked + .slider:before {
   margin-bottom: 4px;
   font-weight: bold;
   min-height: 14px;
+}
+
+.eq-section.disabled .eq-bands,
+.eq-section.disabled .eq-reset-btn {
+  display: none;
 }
 
 
@@ -215,6 +221,3 @@ input:checked + .slider:before {
     color: #eee;
   }
 }
-
-
-
