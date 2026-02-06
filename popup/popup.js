@@ -6,6 +6,13 @@ const eqSliders = Array.from({ length: 8 }, (_, i) => document.getElementById(`e
 const eqValues = Array.from({ length: 8 }, (_, i) => document.getElementById(`eq${i}-value`));
 const eqResetBtn = document.getElementById('eqReset');
 const eqSection = document.querySelector('.eq-section');
+const eqBands = document.querySelector('.eq-bands');
+
+const canvas = document.createElement('canvas');
+canvas.className = 'eq-curve-canvas';
+if (eqBands) {
+    eqBands.appendChild(canvas);
+}
 
 const eqLabels = document.querySelectorAll('.eq-label');
 const freqLabels = ['60', '170', '310', '600', '1k', '3k', '6k', '12k'];
@@ -20,6 +27,7 @@ function setStatus(enabled) {
 function setEQVisibility(visible) {
     if (eqSection) {
         eqSection.classList.toggle('disabled', !visible);
+        if (visible) requestAnimationFrame(drawEQCurve);
     }
 }
 
@@ -75,6 +83,7 @@ async function init() {
             updateEQValue(index, gain);
         }
     });
+    requestAnimationFrame(drawEQCurve);
 }
 
 toggle.addEventListener('change', async () => {
@@ -154,6 +163,7 @@ async function updateEQBand(bandIndex) {
             });
         } catch (_) {}
     }
+    requestAnimationFrame(drawEQCurve);
 }
 
 // Add event listeners for all EQ sliders
@@ -174,6 +184,7 @@ async function resetEQ() {
             updateEQValue(index, gain);
         }
     });
+    requestAnimationFrame(drawEQCurve);
     
     // Save to storage
     await browser.storage.local.set({ eqGains: resetGains });
@@ -193,5 +204,83 @@ async function resetEQ() {
 if (eqResetBtn) {
     eqResetBtn.addEventListener('click', resetEQ);
 }
+
+function drawEQCurve() {
+    if (!canvas || !eqBands || eqSection.classList.contains('disabled')) return;
+
+    const rect = eqBands.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    if (canvas.width !== rect.width * dpr || canvas.height !== rect.height * dpr) {
+        canvas.width = rect.width * dpr;
+        canvas.height = rect.height * dpr;
+        canvas.style.width = `${rect.width}px`;
+        canvas.style.height = `${rect.height}px`;
+    }
+
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    const points = eqSliders.map(slider => {
+        if (!slider) return null;
+        const sRect = slider.getBoundingClientRect();
+        // Calculate center X relative to the bands container
+        const x = sRect.left + sRect.width / 2 - rect.left;
+        
+        // Calculate Y based on slider value
+        // The slider is rotated -90deg, so "max" is visually at the top
+        const centerY = sRect.top + sRect.height / 2 - rect.top;
+        const val = parseFloat(slider.value);
+        const min = parseFloat(slider.min);
+        const max = parseFloat(slider.max);
+        
+        // Visual travel distance of the thumb (90px track - 18px thumb)
+        const trackLength = 72; 
+        
+        // Normalize value (-1 to 1)
+        const norm = (val - (min + max)/2) / ((max - min)/2);
+        // Invert Y because screen Y grows downwards, but we want max value at top
+        const y = centerY - (norm * (trackLength / 2));
+        
+        return { x, y };
+    }).filter(p => p !== null);
+
+    if (points.length < 2) return;
+
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+
+    // Draw smooth curve through points
+    for (let i = 0; i < points.length - 1; i++) {
+        const midX = (points[i].x + points[i+1].x) / 2;
+        const midY = (points[i].y + points[i+1].y) / 2;
+        const cp1x = (points[i].x + midX) / 2;
+        const cp1y = points[i].y; 
+        // Simple cubic spline approximation or Catmull-Rom could be used here.
+        // For a slider visualizer, a simple monotonic curve or tension spline is best.
+        // Let's use a tension spline logic for smoother fit:
+        const p0 = points[Math.max(0, i - 1)];
+        const p1 = points[i];
+        const p2 = points[i + 1];
+        const p3 = points[Math.min(points.length - 1, i + 2)];
+
+        const cp1x_t = p1.x + (p2.x - p0.x) / 6;
+        const cp1y_t = p1.y + (p2.y - p0.y) / 6;
+        const cp2x_t = p2.x - (p3.x - p1.x) / 6;
+        const cp2y_t = p2.y - (p3.y - p1.y) / 6;
+
+        ctx.bezierCurveTo(cp1x_t, cp1y_t, cp2x_t, cp2y_t, p2.x, p2.y);
+    }
+    ctx.stroke();
+}
+
+window.addEventListener('resize', drawEQCurve);
 
 init();

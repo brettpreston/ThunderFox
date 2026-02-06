@@ -114,6 +114,7 @@ input:checked + .slider:before {
   justify-content: space-around; /* Use space-around for even spacing */
   gap: 2px;
   padding: 10px 0;
+  position: relative;
 }
 
 .eq-band {
@@ -123,6 +124,8 @@ input:checked + .slider:before {
   justify-content: space-between;
   align-items: center;
   text-align: center;
+  position: relative;
+  z-index: 1;
 }
 
 .eq-slider-container {
@@ -196,6 +199,13 @@ input:checked + .slider:before {
   display: none;
 }
 
+.eq-curve-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  z-index: 0;
+}
 
 @media (prefers-color-scheme: dark) {
   .eq-reset-btn {
