@@ -6,7 +6,7 @@
         limiter: null,
         enabled: true,
         observer: null,
-        limiterThresholdDb: 0,
+        limiterThresholdDb: -5,
         hpEnabled: false,
         eqEnabled: true,
         eq: null,
@@ -24,6 +24,12 @@
             STATE.hpFilter = createBiquadHighpass(STATE.audioContext, 200);
             // 8-band equalizer before limiter
             STATE.eq = create8BandEQ(STATE.audioContext);
+
+            // Apply stored limiter threshold
+            if (STATE.limiter && STATE.limiter.comp) {
+                STATE.limiter.comp.threshold.value = STATE.limiterThresholdDb;
+            }
+            updateLimiterCompensation(STATE.limiterThresholdDb);
 
             // Wire DSP chain
             updateDSPChain();
@@ -391,7 +397,7 @@
     async function init() {
         const { enabled, limiterThreshold, eqGains, eqEnabled, hpEnabled } = await browser.storage.local.get({ 
             enabled: true, 
-            limiterThreshold: 0,
+            limiterThreshold: -5,
             eqGains: [0, 0, 0, 0, 0, 0, 0, 0],
             eqEnabled: true,
             hpEnabled: false
@@ -399,7 +405,7 @@
         STATE.enabled = !!enabled;
         STATE.eqEnabled = eqEnabled !== undefined ? !!eqEnabled : true;
         STATE.hpEnabled = !!hpEnabled;
-        STATE.limiterThresholdDb = typeof limiterThreshold === 'number' ? limiterThreshold : -6; // default threshold
+        STATE.limiterThresholdDb = typeof limiterThreshold === 'number' ? limiterThreshold : -5; // default threshold
         STATE.eqGains = Array.isArray(eqGains) && eqGains.length === 8 
             ? eqGains.map(g => Math.max(-18, Math.min(18, typeof g === 'number' ? g : 0)))
             : [0, 0, 0, 0, 0, 0, 0, 0];

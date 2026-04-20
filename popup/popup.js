@@ -58,7 +58,7 @@ async function init() {
     const { enabled, hpEnabled, limiterThreshold: limiterThDb, eqGains, eqEnabled } = await browser.storage.local.get({ 
         enabled: true, 
         hpEnabled: false, 
-        limiterThreshold: -6,
+        limiterThreshold: -5,
         eqGains: [0, 0, 0, 0, 0, 0, 0, 0],
         eqEnabled: true
     });
