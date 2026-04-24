@@ -92,7 +92,7 @@
         compensation.gain.value = 1.0;
 
         const ceiling = ctx.createGain();
-        ceiling.gain.value = 0.99;
+        ceiling.gain.value = 0.98;
 
         input.connect(comp);
         comp.connect(compensation);
@@ -297,6 +297,11 @@
         return Math.pow(10, db / 20);
     }
 
+    function isBandcampPage() {
+        const hostname = window.location.hostname.toLowerCase();
+        return hostname === 'bandcamp.com' || hostname.endsWith('.bandcamp.com');
+    }
+
     function wireMediaElement(mediaEl) {
         if (STATE.mediaElToNodes.has(mediaEl)) return;
         ensureAudioContext();
@@ -395,6 +400,11 @@
     }
 
     async function init() {
+        if (isBandcampPage()) {
+            console.info('ThunderFox: skipping Bandcamp for playback compatibility');
+            return;
+        }
+
         const { enabled, limiterThreshold, eqGains, eqEnabled, hpEnabled } = await browser.storage.local.get({ 
             enabled: true, 
             limiterThreshold: -5,
