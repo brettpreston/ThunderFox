@@ -18,18 +18,30 @@ body {
   max-width: 260px;
 }
 h1 {
-  margin: 0 0 12px 0;
-  font-size: 16px;
+  margin: 0 0 8px 0;
+  font-size: 14px;
+}
+.main-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 .status {
-  margin-top: 8px;
   font-size: 12px;
   opacity: 0.8;
 }
 .controls {
-  margin-top: 12px;
+  margin-top: 10px;
   display: grid;
-  gap: 10px;
+  /* Grid items default to min-width:auto, so a row's min-content width (the
+     range input plus its label and readout) would widen the column past the
+     popup and push the readouts outside the window. */
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+
+.controls > * {
+  min-width: 0;
 }
 .row {
   display: flex;
@@ -38,13 +50,77 @@ h1 {
   font-size: 12px;
   min-width: 0;
 }
+/* Shared label column so every control row lines up down the popup. */
+.row > span:first-child {
+  width: 58px;
+  flex: 0 0 auto;
+}
 .row input[type="range"] {
   flex: 1;
   min-width: 0;
+  height: 18px;
+}
+.row input[type="checkbox"] {
+  margin: 0;
 }
 .value {
   width: 44px;
   text-align: right;
+}
+
+.hint-text {
+  margin: 5px 0 0;
+  font-size: 11px;
+  line-height: 1.35;
+  opacity: 0.7;
+}
+
+/* Advanced section */
+.advanced-section {
+  margin-top: 12px;
+}
+
+.adv-row {
+  margin-bottom: 2px;
+}
+
+.adv-value {
+  width: 50px;
+  flex: 0 0 auto;
+  text-align: right;
+  font-family: monospace;
+  font-size: 11px;
+}
+
+.advanced-section.disabled .advanced-body,
+.advanced-section.disabled .eq-reset-btn {
+  display: none;
+}
+
+.exempt-section {
+  margin-top: 4px;
+}
+
+.exempt-section.unavailable .row {
+  opacity: 0.5;
+}
+
+.manage-btn {
+  width: 100%;
+  border: 1px solid rgba(76, 175, 80, 0.45);
+  border-radius: 8px;
+  padding: 7px 10px;
+  background: rgba(76, 175, 80, 0.12);
+  color: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s, border-color 0.2s;
+}
+
+.manage-btn:hover {
+  background: rgba(76, 175, 80, 0.18);
+  border-color: rgba(76, 175, 80, 0.7);
 }
 /* toggle */
 .switch {
@@ -54,6 +130,9 @@ h1 {
   height: 26px;
 }
 .switch input { display:none; }
+.switch-sm {
+  transform: scale(0.8);
+}
 .slider {
   position: absolute;
   cursor: pointer;
@@ -80,14 +159,14 @@ input:checked + .slider:before {
 
 /* EQ Section */
 .eq-section {
-  margin-top: 20px;
+  margin-top: 12px;
 }
 
 .eq-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 15px;
+  margin-bottom: 8px;
 }
 
 .eq-title {
@@ -96,8 +175,8 @@ input:checked + .slider:before {
 }
 
 .eq-reset-btn {
-  font-size: 12px;
-  padding: 5px 10px;
+  font-size: 11px;
+  padding: 3px 8px;
   border: 1px solid transparent;
   border-radius: 6px;
   background-color: rgba(0, 0, 0, 0.05);
@@ -111,14 +190,17 @@ input:checked + .slider:before {
 
 .eq-bands {
   display: flex;
-  justify-content: space-around; /* Use space-around for even spacing */
+  justify-content: space-between;
   gap: 2px;
-  padding: 10px 0;
+  padding: 4px 0;
   position: relative;
+  min-width: 0;
 }
 
 .eq-band {
   width: 24px; /* Give each band a fixed width */
+  flex: 0 1 24px;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
@@ -130,12 +212,16 @@ input:checked + .slider:before {
 
 .eq-slider-container {
   width: 100%;
-  height: 100px; /* Set a fixed height for the slider area */
+  height: 54px; /* Set a fixed height for the slider area */
   position: relative;
-  margin: 10px 0;
+  margin: 4px 0;
 }
 
 .eq-slider {
+  /* popup.js reads --eq-thumb to place the curve, since the thumb's size
+     cannot be measured from the rotated slider's bounding rect. */
+  --eq-thumb: 14px;
+
   -webkit-appearance: none;
   appearance: none;
   background: rgba(0, 0, 0, 0.1);
@@ -145,7 +231,7 @@ input:checked + .slider:before {
   transition: background-color 0.2s;
 
   /* Magic for vertical sliders */
-  width: 90px;  /* This becomes the visual height */
+  width: 50px;  /* This becomes the visual height */
   height: 6px; /* This becomes the visual width (track thickness) */
   margin: 0;
   position: absolute;
@@ -158,22 +244,22 @@ input:checked + .slider:before {
 .eq-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 18px;
-  height: 18px;
+  width: var(--eq-thumb);
+  height: var(--eq-thumb);
   background: #4caf50;
   border-radius: 50%;
   cursor: pointer;
-  border: 3px solid #fff;
+  border: 2px solid #fff;
   box-shadow: 0 0 2px rgba(0,0,0,0.3);
 }
 
 .eq-slider::-moz-range-thumb {
-  width: 18px;
-  height: 18px;
+  width: var(--eq-thumb);
+  height: var(--eq-thumb);
   background: #4caf50;
   border-radius: 50%;
   cursor: pointer;
-  border: 3px solid #fff;
+  border: 2px solid #fff;
   box-shadow: 0 0 2px rgba(0,0,0,0.3);
 }
 
@@ -203,11 +289,24 @@ input:checked + .slider:before {
   position: absolute;
   top: 0;
   left: 0;
+  /* A canvas defaults to 300x150 until drawEQCurve sizes it, which only
+     happens once the EQ section is visible; without this it would paint
+     outside the popup on first open. */
+  max-width: 100%;
+  max-height: 100%;
   pointer-events: none;
   z-index: 0;
 }
 
 @media (prefers-color-scheme: dark) {
+  .manage-btn {
+    background: rgba(76, 175, 80, 0.18);
+    border-color: rgba(129, 199, 132, 0.5);
+  }
+  .manage-btn:hover {
+    background: rgba(76, 175, 80, 0.28);
+    border-color: rgba(129, 199, 132, 0.75);
+  }
   .eq-reset-btn {
     background-color: rgba(255, 255, 255, 0.1);
     color: #eee;

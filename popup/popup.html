@@ -9,19 +9,21 @@
 <body>
     <div class="container">
         <h1>ThunderFox - by 7nihilate</h1>
-        <label class="switch">
-            <input id="toggle" type="checkbox">
-            <span class="slider"></span>
-        </label>
-        <div class="status" id="status">Disabled</div>
+        <div class="main-toggle">
+            <label class="switch">
+                <input id="toggle" type="checkbox">
+                <span class="slider"></span>
+            </label>
+            <div class="status" id="status">Disabled</div>
+        </div>
         <div class="controls">
             <label class="row">
-                <input id="hpToggle" type="checkbox">
                 <span>Bass cut</span>
+                <input id="hpToggle" type="checkbox">
             </label>
             <label class="row">
                 <span>Loudness</span>
-                <input id="limiterThreshold" type="range" min="0" max="20" step="1">
+                <input id="limiterThreshold" type="range" min="0" max="30" step="1">
             </label>
             <div class="eq-section">
                 <div class="eq-header">
@@ -87,11 +89,54 @@
                     </div>
                 </div>
             </div>
+            <div class="advanced-section disabled" id="advancedSection">
+                <div class="eq-header">
+                    <div class="eq-title">Advanced</div>
+                    <button id="advancedReset" class="eq-reset-btn">Reset</button>
+                    <label class="switch switch-sm">
+                        <input id="advancedToggle" type="checkbox">
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <div class="advanced-body">
+                    <label class="row adv-row">
+                        <span>Pre-boost</span>
+                        <input id="preBoost" type="range" min="0" max="100" step="1">
+                        <span class="adv-value" id="preBoost-value">+6.0 dB</span>
+                    </label>
+                    <label class="row adv-row">
+                        <span>Comp atk</span>
+                        <input id="compAttack" type="range" min="0" max="100" step="1">
+                        <span class="adv-value" id="compAttack-value">3 ms</span>
+                    </label>
+                    <label class="row adv-row">
+                        <span>Comp rel</span>
+                        <input id="compRelease" type="range" min="0" max="100" step="1">
+                        <span class="adv-value" id="compRelease-value">100 ms</span>
+                    </label>
+                    <label class="row adv-row">
+                        <span>Lim atk</span>
+                        <input id="limiterAttack" type="range" min="0" max="100" step="1">
+                        <span class="adv-value" id="limiterAttack-value">2 ms</span>
+                    </label>
+                    <label class="row adv-row">
+                        <span>Lim rel</span>
+                        <input id="limiterRelease" type="range" min="0" max="100" step="1">
+                        <span class="adv-value" id="limiterRelease-value">120 ms</span>
+                    </label>
+                </div>
+            </div>
+            <div class="exempt-section">
+                <label class="row">
+                    <input id="exemptToggle" type="checkbox">
+                    <span id="exemptLabel">Exempt this site</span>
+                </label>
+                <p class="hint-text" id="exemptHint" hidden></p>
+            </div>
+            <button id="manageExemptions" class="manage-btn" type="button">Manage exempt sites</button>
         </div>
     </div>
+    <script src="../common/sites.js"></script>
     <script src="popup.js"></script>
-    
 </body>
 </html>
-
-

@@ -1,0 +1,247 @@
+:root {
+  color-scheme: light dark;
+  --bg: linear-gradient(180deg, #f4f8f0 0%, #e2ebdc 100%);
+  --panel: rgba(255, 255, 255, 0.78);
+  --panel-border: rgba(54, 82, 46, 0.12);
+  --text: #1b2516;
+  --muted: #56654e;
+  --accent: #2e7d32;
+  --accent-strong: #1f5f25;
+  --danger: #a3362b;
+  --shadow: 0 18px 48px rgba(31, 52, 24, 0.12);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: "Segoe UI", "Trebuchet MS", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.page {
+  width: min(760px, calc(100vw - 32px));
+  margin: 0 auto;
+  padding: 32px 0 48px;
+}
+
+.hero {
+  margin-bottom: 22px;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(30px, 5vw, 44px);
+  line-height: 1;
+}
+
+.intro {
+  max-width: 58ch;
+  margin: 14px 0 0;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 20px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(12px);
+  padding: 22px;
+}
+
+.panel + .panel {
+  margin-top: 18px;
+}
+
+.exemption-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.field span {
+  color: var(--muted);
+}
+
+.field input {
+  width: 100%;
+  border: 1px solid rgba(46, 125, 50, 0.24);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.78);
+  color: inherit;
+  font: inherit;
+}
+
+.field input:focus {
+  outline: 2px solid rgba(46, 125, 50, 0.32);
+  outline-offset: 2px;
+}
+
+.primary-btn,
+.secondary-btn,
+.remove-btn {
+  border: 0;
+  border-radius: 12px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.primary-btn {
+  padding: 12px 16px;
+  background: var(--accent);
+  color: #f7fff5;
+  font-weight: 700;
+}
+
+.primary-btn:hover {
+  background: var(--accent-strong);
+}
+
+.secondary-btn {
+  padding: 10px 14px;
+  background: rgba(46, 125, 50, 0.1);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.secondary-btn:hover {
+  background: rgba(46, 125, 50, 0.16);
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.panel-header h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.form-message,
+.empty-state,
+.hint {
+  margin: 12px 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.form-message[data-state="error"] {
+  color: var(--danger);
+}
+
+.form-message[data-state="success"] {
+  color: var(--accent-strong);
+}
+
+.site-list {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.site-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.74);
+  border: 1px solid rgba(46, 125, 50, 0.12);
+}
+
+.site-value {
+  font-size: 15px;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.remove-btn {
+  padding: 8px 12px;
+  background: rgba(163, 54, 43, 0.1);
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.remove-btn:hover {
+  background: rgba(163, 54, 43, 0.16);
+}
+
+@media (max-width: 640px) {
+  .page {
+    width: min(100vw, calc(100vw - 20px));
+    padding-top: 20px;
+  }
+
+  .panel {
+    padding: 18px;
+  }
+
+  .exemption-form {
+    grid-template-columns: 1fr;
+  }
+
+  .panel-header,
+  .site-item {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .primary-btn,
+  .secondary-btn,
+  .remove-btn {
+    width: 100%;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: linear-gradient(180deg, #172116 0%, #101710 100%);
+    --panel: rgba(26, 35, 23, 0.86);
+    --panel-border: rgba(171, 210, 165, 0.12);
+    --text: #eef6eb;
+    --muted: #b1c3ac;
+    --accent: #6dbb74;
+    --accent-strong: #91d796;
+    --danger: #ff8d82;
+    --shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+  }
+
+  .field input,
+  .site-item {
+    background: rgba(10, 14, 10, 0.36);
+  }
+
+  .secondary-btn {
+    color: var(--accent-strong);
+  }
+}

@@ -1,0 +1,41 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ThunderFox Site Exemptions</title>
+    <link rel="stylesheet" href="options.css">
+</head>
+<body>
+    <main class="page">
+        <section class="hero">
+            <p class="eyebrow">ThunderFox</p>
+            <h1>Site exemptions</h1>
+            <p class="intro">Add domains that ThunderFox should ignore entirely. A match applies to the listed domain and all of its subdomains.</p>
+        </section>
+
+        <section class="panel">
+            <form id="exemptionForm" class="exemption-form">
+                <label class="field" for="siteInput">
+                    <span>Domain or URL</span>
+                    <input id="siteInput" name="siteInput" type="text" placeholder="bandcamp.com or https://example.com" autocomplete="off">
+                </label>
+                <button class="primary-btn" type="submit">Add site</button>
+            </form>
+            <p id="formMessage" class="form-message" aria-live="polite"></p>
+        </section>
+
+        <section class="panel list-panel">
+            <div class="panel-header">
+                <h2>Exempted sites</h2>
+                <button id="resetDefaults" class="secondary-btn" type="button">Restore defaults</button>
+            </div>
+            <p id="emptyState" class="empty-state">No sites are exempted right now. ThunderFox will run on every supported site.</p>
+            <ul id="siteList" class="site-list"></ul>
+            <p class="hint">Reload already-open pages after editing the list. ThunderFox cannot hand a media element back to the browser once it has started processing it, so a reload is what makes a new exemption take full effect. Exempting a page also exempts everything it embeds in an iframe.</p>
+        </section>
+    </main>
+    <script src="../common/sites.js"></script>
+    <script src="options.js"></script>
+</body>
+</html>
