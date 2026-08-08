@@ -2,6 +2,7 @@ const toggle = document.getElementById('toggle');
 const statusEl = document.getElementById('status');
 const hpToggle = document.getElementById('hpToggle');
 const limiterThreshold = document.getElementById('limiterThreshold');
+const loudnessValue = document.getElementById('loudness-value');
 const eqSliders = Array.from({ length: 8 }, (_, i) => document.getElementById(`eq${i}`));
 const eqValues = Array.from({ length: 8 }, (_, i) => document.getElementById(`eq${i}-value`));
 const eqResetBtn = document.getElementById('eqReset');
@@ -22,11 +23,14 @@ const exemptHint = document.getElementById('exemptHint');
 // unit 'db' uses a linear slider; 'ms' uses a logarithmic one.
 const DYNAMICS = {
     preBoostDb: { min: 0, max: 24, default: 6, unit: 'db' },
-    compAttackMs: { min: 0.1, max: 100, default: 3, unit: 'ms' },
-    compReleaseMs: { min: 20, max: 1000, default: 100, unit: 'ms' },
-    limiterAttackMs: { min: 0.05, max: 20, default: 2, unit: 'ms' },
-    limiterReleaseMs: { min: 10, max: 500, default: 120, unit: 'ms' }
+    compAttackMs: { min: 0.1, max: 100, default: 10, unit: 'ms' },
+    compReleaseMs: { min: 20, max: 1000, default: 300, unit: 'ms' },
+    limiterAttackMs: { min: 0.2, max: 5, default: 3, unit: 'ms' },
+    limiterReleaseMs: { min: 10, max: 500, default: 100, unit: 'ms' }
 };
+
+// Matches MAX_DRIVE_DB in content/content.js.
+const MAX_LOUDNESS_DB = 30;
 
 const DYNAMICS_CONTROLS = {
     preBoostDb: 'preBoost',
@@ -280,7 +284,7 @@ async function init() {
     const stored = await browser.storage.local.get({
         enabled: true,
         hpEnabled: false,
-        limiterThreshold: -8,
+        limiterThreshold: -12,
         eqGains: [0, 0, 0, 0, 0, 0, 0, 0],
         eqEnabled: true,
         advancedEnabled: false,
@@ -299,6 +303,7 @@ async function init() {
     if (eqToggle) eqToggle.checked = initialEqEnabled;
     setEQVisibility(initialEqEnabled);
     limiterThreshold.value = String(-stored.limiterThreshold);
+    renderLoudness();
 
     advancedToggle.checked = !!stored.advancedEnabled;
     setAdvancedVisibility(!!stored.advancedEnabled);
@@ -347,8 +352,17 @@ if (eqToggle) {
     });
 }
 
+// One macro morphs compression strength and limiter drive together, so the
+// readout is a percentage rather than either underlying value.
+function renderLoudness() {
+    if (!loudnessValue) return;
+    const percent = Math.round((Number(limiterThreshold.value) / MAX_LOUDNESS_DB) * 100);
+    loudnessValue.textContent = `${percent}%`;
+}
+
 limiterThreshold.addEventListener('input', async () => {
     const th = -Number(limiterThreshold.value);
+    renderLoudness();
     await browser.storage.local.set({ limiterThreshold: th });
     await sendToActiveTab({ type: 'THUNDERFOX_LIMITER_THRESHOLD', threshold: th });
 });

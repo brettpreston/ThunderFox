@@ -3,17 +3,19 @@
     // settings stay in storage so toggling Advanced back on restores them.
     const DEFAULT_DYNAMICS = {
         preBoostDb: 6,
-        compAttackMs: 3,
-        compReleaseMs: 100,
-        limiterAttackMs: 2,
-        limiterReleaseMs: 120
+        compAttackMs: 10,
+        compReleaseMs: 300,
+        limiterAttackMs: 3,
+        limiterReleaseMs: 100
     };
 
+    // limiterAttackMs is the limiter's gain-envelope smoothing width and cannot
+    // exceed the worklet's fixed 5 ms look-ahead.
     const DYNAMICS_LIMITS = {
         preBoostDb: { min: 0, max: 24 },
         compAttackMs: { min: 0.1, max: 100 },
         compReleaseMs: { min: 20, max: 1000 },
-        limiterAttackMs: { min: 0.05, max: 20 },
+        limiterAttackMs: { min: 0.2, max: 5 },
         limiterReleaseMs: { min: 10, max: 500 }
     };
 
@@ -26,33 +28,45 @@
     const MAX_DRIVE_DB = 30;
     // Stored as a negative "threshold" for backwards compatibility with
     // settings written by earlier versions; the magnitude is the drive in dB.
-    const DEFAULT_LIMITER_THRESHOLD = -8;
+    const DEFAULT_LIMITER_THRESHOLD = -12;
 
-    const DOWNWARD = { thresholdDb: -12, kneeDb: 6, ratio: 4 };
-    const UPWARD = { thresholdDb: -30, kneeDb: 12, ratio: 8 };
     // Upward compression is slower than downward on purpose; a fast upward
     // release is what makes quiet passages audibly breathe.
     const UPWARD_ATTACK_SCALE = 3;
     const UPWARD_RELEASE_SCALE = 2;
 
-    const BLEND = { down: 0.55, up: 0.30, dry: 0.20 };
+    // Fixed wet mix of the two compressed paths. There is no dry path: the FIR
+    // band splitter and the look-ahead limiter both add delay, so blending dry
+    // against wet would comb-filter. Loudness morphs the compressor and drive
+    // parameters instead (see LOUDNESS_LIGHT / LOUDNESS_EXTREME).
+    const BLEND = { down: 0.65, up: 0.35 };
 
-    // Threshold sits low enough that the knee finishes below 0 dBFS, so the
-    // full 20:1 slope is active across the whole working range.
-    const LIMITER = { thresholdDb: -5, kneeDb: 4, ratio: 20 };
+    // Loudness 0% → light compression, light drive into the brickwall.
+    // Loudness 100% → strong upward/downward compression, heavy drive.
+    const LOUDNESS_LIGHT = {
+        downward: { thresholdDb: -6, kneeDb: 4, ratio: 2 },
+        upward: { thresholdDb: -18, kneeDb: 6, ratio: 2.5 },
+        driveDb: 0
+    };
+    const LOUDNESS_EXTREME = {
+        downward: { thresholdDb: -18, kneeDb: 8, ratio: 8 },
+        upward: { thresholdDb: -42, kneeDb: 12, ratio: 16 },
+        driveDb: MAX_DRIVE_DB
+    };
 
-    // Soft clipper. Below KNEE the curve is the identity, so normal material
-    // passes untouched; above it the curve saturates towards CEILING. Because a
-    // WaveShaper clamps out-of-range input to the curve's endpoints, the output
-    // is mathematically bounded and can never reach the destination's hard clip.
-    const CLIP_KNEE = 0.85;
-    const CLIP_CEILING_DB = -0.4;
-    const CLIP_CURVE_SIZE = 8192;
+    // The brickwall limiter cannot exceed this, so it is a true ceiling rather
+    // than a target. Left a little under 0 dBFS for inter-sample peaks, which
+    // a sample-domain limiter does not see.
+    const OUTPUT_CEILING_DB = -0.3;
+    const LIMITER_WORKLET_PATH = 'content/limiter-processor.js';
+    const LIMITER_WORKLET_NAME = 'thunderfox-brickwall-limiter';
 
     const PARAM_SMOOTHING_SECONDS = 0.02;
 
     const STATE = {
         audioContext: null,
+        contextReady: null,
+        pendingElements: new Set(),
         mediaElToNodes: new Map(),
         masterGain: null,
         limiter: null,
@@ -127,25 +141,68 @@
         return -compressorOutputDb(0, config.thresholdDb, config.kneeDb, config.ratio);
     }
 
+    function lerp(a, b, t) {
+        return a + (b - a) * t;
+    }
+
+    // Slider position as a 0..1 fraction. Stored as a negative "threshold" for
+    // compatibility with settings written by earlier versions.
+    function loudnessAmount(thresholdDb) {
+        return clamp(-thresholdDb, 0, MAX_DRIVE_DB) / MAX_DRIVE_DB;
+    }
+
+    // Crossfade compressor and drive settings between light and extreme.
+    // Both wet paths share the FIR delay, so morphing parameters never
+    // introduces comb filtering the way a dry/wet mix would.
+    function loudnessProfile(amount) {
+        const t = clamp(amount, 0, 1);
+        const mix = (light, extreme) => ({
+            thresholdDb: lerp(light.thresholdDb, extreme.thresholdDb, t),
+            kneeDb: lerp(light.kneeDb, extreme.kneeDb, t),
+            ratio: lerp(light.ratio, extreme.ratio, t)
+        });
+        return {
+            downward: mix(LOUDNESS_LIGHT.downward, LOUDNESS_EXTREME.downward),
+            upward: mix(LOUDNESS_LIGHT.upward, LOUDNESS_EXTREME.upward),
+            driveDb: lerp(LOUDNESS_LIGHT.driveDb, LOUDNESS_EXTREME.driveDb, t)
+        };
+    }
+
+    function applyCompressorSettings(comp, makeup, config) {
+        if (!comp) return;
+        rampParam(comp.threshold, config.thresholdDb);
+        rampParam(comp.knee, config.kneeDb);
+        rampParam(comp.ratio, config.ratio);
+        if (makeup) rampParam(makeup.gain, dbToGain(unityMakeupDb(config)));
+    }
+
+    // Building the context is asynchronous now that the limiter is an
+    // AudioWorklet, so callers await a single shared promise.
     function ensureAudioContext() {
-        if (!STATE.audioContext) {
-            STATE.audioContext = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
-            STATE.masterGain = STATE.audioContext.createGain();
-            STATE.masterGain.gain.value = dbToGain(MASTER_TRIM_DB);
-            // Final limiter
-            STATE.limiter = createLimiter(STATE.audioContext);
-            // Highpass filter placed after multiband output but before limiter (biquad, 200Hz)
-            STATE.hpFilter = createBiquadHighpass(STATE.audioContext, 200);
-            // 8-band equalizer before limiter
-            STATE.eq = create8BandEQ(STATE.audioContext);
+        if (!STATE.contextReady) STATE.contextReady = buildAudioContext();
+        return STATE.contextReady;
+    }
 
-            updateLimiterDrive(STATE.limiterThresholdDb);
-            applyDynamics();
+    async function buildAudioContext() {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+        STATE.audioContext = ctx;
 
-            // Wire DSP chain
-            updateDSPChain();
-            STATE.limiter.output.connect(STATE.audioContext.destination);
-        }
+        STATE.masterGain = ctx.createGain();
+        STATE.masterGain.gain.value = dbToGain(MASTER_TRIM_DB);
+        // Highpass filter placed after multiband output but before limiter (biquad, 200Hz)
+        STATE.hpFilter = createBiquadHighpass(ctx, 200);
+        // 8-band equalizer before limiter
+        STATE.eq = create8BandEQ(ctx);
+        STATE.limiter = await createLimiter(ctx);
+
+        applyLoudness(STATE.limiterThresholdDb);
+        applyDynamics();
+
+        // Wire DSP chain
+        updateDSPChain();
+        STATE.limiter.output.connect(ctx.destination);
+
+        if (STATE.eq && STATE.eq.setGains) STATE.eq.setGains(STATE.eqGains);
     }
 
     function create8BandEQ(ctx) {
@@ -189,54 +246,69 @@
         };
     }
 
-    function createSoftClipper(ctx) {
-        const ceiling = dbToGain(CLIP_CEILING_DB);
-        const span = ceiling - CLIP_KNEE;
-        const curve = new Float32Array(CLIP_CURVE_SIZE);
+    // A look-ahead brickwall limiter needs to see samples before they play,
+    // which no built-in node can do, so the real limiter lives in an
+    // AudioWorklet. If that cannot be loaded the chain still has to be safe,
+    // hence the compressor fallback below.
+    async function createBrickwallNode(ctx) {
+        try {
+            const url = browser.runtime.getURL(LIMITER_WORKLET_PATH);
+            await ctx.audioWorklet.addModule(url);
 
-        for (let i = 0; i < CLIP_CURVE_SIZE; i++) {
-            const x = (i / (CLIP_CURVE_SIZE - 1)) * 2 - 1;
-            const magnitude = Math.abs(x);
-            const shaped = magnitude <= CLIP_KNEE
-                ? magnitude
-                : CLIP_KNEE + span * Math.tanh((magnitude - CLIP_KNEE) / span);
-            curve[i] = Math.sign(x) * shaped;
+            const node = new AudioWorkletNode(ctx, LIMITER_WORKLET_NAME, {
+                numberOfInputs: 1,
+                numberOfOutputs: 1,
+                parameterData: { ceiling: dbToGain(OUTPUT_CEILING_DB) }
+            });
+
+            return {
+                node,
+                brickwall: true,
+                setSmoothing: (seconds) => rampParam(node.parameters.get('smoothing'), seconds),
+                setRelease: (seconds) => rampParam(node.parameters.get('release'), seconds)
+            };
+        } catch (error) {
+            console.warn('ThunderFox: brickwall worklet unavailable, using compressor fallback', error);
+
+            const comp = ctx.createDynamicsCompressor();
+            comp.threshold.value = OUTPUT_CEILING_DB - 2;
+            comp.knee.value = 0;
+            comp.ratio.value = 20;
+            comp.attack.value = 0.001;
+            comp.release.value = msToSeconds(DEFAULT_DYNAMICS.limiterReleaseMs);
+
+            return {
+                node: comp,
+                brickwall: false,
+                setSmoothing: (seconds) => rampParam(comp.attack, seconds),
+                setRelease: (seconds) => rampParam(comp.release, seconds)
+            };
         }
-
-        const shaper = ctx.createWaveShaper();
-        shaper.curve = curve;
-        // Shaping generates harmonics; running the curve at 4x pushes their
-        // aliases above the audible band before downsampling.
-        shaper.oversample = '4x';
-
-        return shaper;
     }
 
-    function createLimiter(ctx) {
+    async function createLimiter(ctx) {
         const input = ctx.createGain();
 
-        // Drive carries the loudness makeup and sits *ahead* of the compressor,
-        // so raising loudness pushes signal into the limiter instead of adding
-        // gain downstream of the only stage protecting the output.
+        // Drive sits ahead of the limiter, so raising Loudness pushes signal
+        // into a fixed ceiling rather than adding gain after the only stage
+        // protecting the output. This is the LoudMax threshold control: lowering
+        // the threshold and making up the difference is the same operation.
         const drive = ctx.createGain();
         drive.gain.value = 1.0;
 
-        const comp = ctx.createDynamicsCompressor();
-        comp.threshold.value = LIMITER.thresholdDb;
-        comp.knee.value = LIMITER.kneeDb;
-        comp.ratio.value = LIMITER.ratio;
-        comp.attack.value = msToSeconds(DEFAULT_DYNAMICS.limiterAttackMs);
-        comp.release.value = msToSeconds(DEFAULT_DYNAMICS.limiterReleaseMs);
-
-        // The compressor holds the steady level; the clipper exists only to
-        // catch the transient overshoot a finite attack time lets through.
-        const clipper = createSoftClipper(ctx);
+        const limiter = await createBrickwallNode(ctx);
 
         input.connect(drive);
-        drive.connect(comp);
-        comp.connect(clipper);
+        drive.connect(limiter.node);
 
-        return { input, output: clipper, drive, comp, clipper };
+        return {
+            input,
+            output: limiter.node,
+            drive,
+            brickwall: limiter.brickwall,
+            setSmoothing: limiter.setSmoothing,
+            setRelease: limiter.setRelease
+        };
     }
 
     function updateDSPChain() {
@@ -387,19 +459,20 @@
         const dynamics = effectiveDynamics();
         const compAttack = msToSeconds(dynamics.compAttackMs);
         const compRelease = msToSeconds(dynamics.compReleaseMs);
+        const profile = loudnessProfile(loudnessAmount(STATE.limiterThresholdDb));
 
         // Downward path: holds the loud end of the band in check, then makeup
         // returns full-scale content to where it started so the compression
         // reads as density rather than as a volume drop.
         const downComp = ctx.createDynamicsCompressor();
-        downComp.threshold.value = DOWNWARD.thresholdDb;
-        downComp.knee.value = DOWNWARD.kneeDb;
-        downComp.ratio.value = DOWNWARD.ratio;
+        downComp.threshold.value = profile.downward.thresholdDb;
+        downComp.knee.value = profile.downward.kneeDb;
+        downComp.ratio.value = profile.downward.ratio;
         downComp.attack.value = compAttack;
         downComp.release.value = compRelease;
 
         const downMakeup = ctx.createGain();
-        downMakeup.gain.value = dbToGain(unityMakeupDb(DOWNWARD));
+        downMakeup.gain.value = dbToGain(unityMakeupDb(profile.downward));
 
         // Upward path: a low threshold with a high ratio collapses the band's
         // dynamic range from the bottom, and the makeup below restores the loud
@@ -407,27 +480,23 @@
         // (DynamicsCompressorNode clamps ratio to 1-20, so a sub-1 ratio cannot
         // be used to get upward behaviour directly.)
         const upComp = ctx.createDynamicsCompressor();
-        upComp.threshold.value = UPWARD.thresholdDb;
-        upComp.knee.value = UPWARD.kneeDb;
-        upComp.ratio.value = UPWARD.ratio;
+        upComp.threshold.value = profile.upward.thresholdDb;
+        upComp.knee.value = profile.upward.kneeDb;
+        upComp.ratio.value = profile.upward.ratio;
         upComp.attack.value = clamp(compAttack * UPWARD_ATTACK_SCALE, 0, 1);
         upComp.release.value = clamp(compRelease * UPWARD_RELEASE_SCALE, 0, 1);
 
         const upMakeup = ctx.createGain();
-        upMakeup.gain.value = dbToGain(unityMakeupDb(UPWARD));
+        upMakeup.gain.value = dbToGain(unityMakeupDb(profile.upward));
 
+        // Both paths share the FIR delay, so a fixed wet mix is phase-safe.
         const downGain = ctx.createGain();
         downGain.gain.value = BLEND.down;
 
         const upGain = ctx.createGain();
         upGain.gain.value = BLEND.up;
 
-        // Dry blend keeps transients intact through the parallel stages.
-        const dryGain = ctx.createGain();
-        dryGain.gain.value = BLEND.dry;
-
-        // Tonal trim only, correcting the splitter's own response. Loudness
-        // comes from the makeups above and the limiter drive.
+        // Tonal trim only, correcting the splitter's own response.
         const trim = ctx.createGain();
         trim.gain.value = dbToGain(trimDb);
 
@@ -441,13 +510,19 @@
         upComp.connect(upMakeup);
         upMakeup.connect(upGain);
 
-        splitter.connect(dryGain);
-
         downGain.connect(trim);
         upGain.connect(trim);
-        dryGain.connect(trim);
 
-        return { input: filters.first, output: trim, downComp, upComp };
+        return {
+            input: filters.first,
+            output: trim,
+            downComp,
+            upComp,
+            downMakeup,
+            upMakeup,
+            downGain,
+            upGain
+        };
     }
 
     function applyDynamics() {
@@ -469,23 +544,32 @@
             });
         });
 
-        if (STATE.limiter && STATE.limiter.comp) {
-            STATE.limiter.comp.attack.value = msToSeconds(dynamics.limiterAttackMs);
-            STATE.limiter.comp.release.value = msToSeconds(dynamics.limiterReleaseMs);
+        if (STATE.limiter) {
+            STATE.limiter.setSmoothing(msToSeconds(dynamics.limiterAttackMs));
+            STATE.limiter.setRelease(msToSeconds(dynamics.limiterReleaseMs));
         }
     }
 
-    function updateLimiterDrive(thresholdDb) {
-        // The stored value is a negative "threshold"; it now sets how hard the
-        // signal is driven into a limiter whose own threshold stays fixed.
-        const driveDb = clamp(-thresholdDb, 0, MAX_DRIVE_DB);
+    // Morph compressor strength and limiter drive together. No dry/wet mix:
+    // that would comb against the FIR and look-ahead delays.
+    function applyLoudness(thresholdDb) {
+        const profile = loudnessProfile(loudnessAmount(thresholdDb));
+
         if (STATE.limiter && STATE.limiter.drive) {
-            rampParam(STATE.limiter.drive.gain, dbToGain(driveDb));
+            rampParam(STATE.limiter.drive.gain, dbToGain(profile.driveDb));
         }
+
+        STATE.mediaElToNodes.forEach((nodes) => {
+            [nodes.low, nodes.mid, nodes.high].forEach((band) => {
+                if (!band) return;
+                applyCompressorSettings(band.downComp, band.downMakeup, profile.downward);
+                applyCompressorSettings(band.upComp, band.upMakeup, profile.upward);
+            });
+        });
     }
 
-    function wireMediaElement(mediaEl) {
-        if (STATE.mediaElToNodes.has(mediaEl)) return;
+    async function wireMediaElement(mediaEl) {
+        if (STATE.mediaElToNodes.has(mediaEl) || STATE.pendingElements.has(mediaEl)) return;
 
         // Checked before building anything, so a page that only carries DRM
         // content never gets an AudioContext at all.
@@ -494,38 +578,58 @@
             return;
         }
 
-        ensureAudioContext();
-
-        let source;
+        // Loading the limiter worklet is asynchronous, so the same element can
+        // arrive again from the observer before the first call finishes.
+        STATE.pendingElements.add(mediaEl);
         try {
-            source = STATE.audioContext.createMediaElementSource(mediaEl);
+            await ensureAudioContext();
         } catch (error) {
-            console.log('ThunderFox: Unable to access media element audio:', error);
+            STATE.pendingElements.delete(mediaEl);
+            console.log('ThunderFox: Unable to start audio processing:', error);
             return;
         }
 
-        // Pre-boost sits ahead of the bands, so raising it drives the
-        // compressors harder and adds density as well as level.
-        const preGain = STATE.audioContext.createGain();
-        preGain.gain.value = dbToGain(effectiveDynamics().preBoostDb);
+        try {
+            if (STATE.mediaElToNodes.has(mediaEl) || !mediaEl.isConnected) return;
 
-        const low = createBand(STATE.audioContext, 20, 200, BAND_TRIM_DB.low);
-        const mid = createBand(STATE.audioContext, 200, 2500, BAND_TRIM_DB.mid);
-        const high = createBand(STATE.audioContext, 2500, 20000, BAND_TRIM_DB.high);
+            const ctx = STATE.audioContext;
 
-        source.connect(preGain);
-        preGain.connect(low.input);
-        preGain.connect(mid.input);
-        preGain.connect(high.input);
+            let source;
+            try {
+                source = ctx.createMediaElementSource(mediaEl);
+            } catch (error) {
+                console.log('ThunderFox: Unable to access media element audio:', error);
+                return;
+            }
 
-        low.output.connect(STATE.masterGain);
-        mid.output.connect(STATE.masterGain);
-        high.output.connect(STATE.masterGain);
+            // Pre-boost sits ahead of the bands, so raising it drives the
+            // compressors harder and adds density as well as level.
+            const preGain = ctx.createGain();
+            preGain.gain.value = dbToGain(effectiveDynamics().preBoostDb);
 
-        STATE.mediaElToNodes.set(mediaEl, { source, preGain, low, mid, high });
-        applyEnabledState(mediaEl);
+            const low = createBand(ctx, 20, 200, BAND_TRIM_DB.low);
+            const mid = createBand(ctx, 200, 2500, BAND_TRIM_DB.mid);
+            const high = createBand(ctx, 2500, 20000, BAND_TRIM_DB.high);
 
-        console.log('ThunderFox: Media element wired successfully', { enabled: STATE.enabled });
+            source.connect(preGain);
+            preGain.connect(low.input);
+            preGain.connect(mid.input);
+            preGain.connect(high.input);
+
+            low.output.connect(STATE.masterGain);
+            mid.output.connect(STATE.masterGain);
+            high.output.connect(STATE.masterGain);
+
+            STATE.mediaElToNodes.set(mediaEl, { source, preGain, low, mid, high });
+            applyEnabledState(mediaEl);
+
+            console.log('ThunderFox: Media element wired successfully', {
+                enabled: STATE.enabled,
+                brickwall: STATE.limiter ? STATE.limiter.brickwall : false
+            });
+        } finally {
+            STATE.pendingElements.delete(mediaEl);
+        }
     }
 
     function unwireMediaElement(mediaEl) {
@@ -672,7 +776,7 @@
             if (msg && msg.type === 'THUNDERFOX_LIMITER_THRESHOLD') {
                 const th = typeof msg.threshold === 'number' ? msg.threshold : DEFAULT_LIMITER_THRESHOLD;
                 STATE.limiterThresholdDb = th;
-                updateLimiterDrive(th);
+                applyLoudness(th);
                 return;
             }
             if (msg && msg.type === 'THUNDERFOX_EQ_GAIN') {
@@ -727,7 +831,7 @@
                         ? changes.limiterThreshold.newValue
                         : DEFAULT_LIMITER_THRESHOLD;
                     STATE.limiterThresholdDb = th;
-                    updateLimiterDrive(th);
+                    applyLoudness(th);
                 }
                 if (changes.eqGains) {
                     const gains = changes.eqGains.newValue;
@@ -757,16 +861,9 @@
             }
         });
 
-        updateLimiterDrive(STATE.limiterThresholdDb);
-        applyDynamics();
-
-        // Apply initial EQ gains
-        if (STATE.eq && STATE.eq.setGains) {
-            STATE.eq.setGains(STATE.eqGains);
-        }
-
-        // Apply initial routing
-        updateDSPChain();
+        // Loudness, dynamics, EQ gains and routing are all applied by
+        // buildAudioContext(), which does not run until the first media
+        // element is wired.
     }
 
     // Fire up the bass cannon
