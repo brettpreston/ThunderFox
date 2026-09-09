@@ -10,6 +10,10 @@ body {
   width: 260px;
   overflow-x: hidden;
   box-sizing: border-box;
+  /* Advanced adds fourteen rows when it is expanded. Rather than cram them,
+     let the popup scroll past that point; it is collapsed by default. */
+  max-height: 580px;
+  overflow-y: auto;
 }
 .container {
   padding: 12px 14px;
@@ -51,9 +55,13 @@ h1 {
   min-width: 0;
 }
 /* Shared label column so every control row lines up down the popup. */
-.row > span:first-child {
+.row > label:first-child {
   width: 58px;
   flex: 0 0 auto;
+}
+/* The exemption row leads with its checkbox, so its label is free-width. */
+.exempt-section .row > label {
+  width: auto;
 }
 .row input[type="range"] {
   flex: 1;
@@ -73,6 +81,76 @@ h1 {
   font-size: 11px;
   line-height: 1.35;
   opacity: 0.7;
+}
+
+.notice {
+  margin: 8px 0 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 152, 0, 0.5);
+  background: rgba(255, 152, 0, 0.12);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+/* Meters */
+.meters {
+  margin-top: 10px;
+  display: grid;
+  gap: 3px;
+}
+
+.meter-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.meter-label {
+  width: 26px;
+  flex: 0 0 auto;
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.meter {
+  flex: 1;
+  min-width: 0;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.12);
+  overflow: hidden;
+}
+
+.meter > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: #4caf50;
+  transition: width 60ms linear;
+}
+
+.meter > i.meter-limit {
+  background: #ff9800;
+}
+
+.meter > i.meter-out {
+  background: #2196f3;
+}
+
+/* Advanced groups */
+.adv-group {
+  margin-top: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.55;
+}
+
+.adv-group:first-child {
+  margin-top: 0;
 }
 
 /* Advanced section */
@@ -129,7 +207,20 @@ h1 {
   width: 46px;
   height: 26px;
 }
-.switch input { display:none; }
+/* Not display:none — that removes the input from the tab order and from the
+   accessibility tree, which took the extension's main on/off switch away from
+   keyboard and screen-reader users entirely. */
+.switch input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+}
+.switch input:focus-visible + .slider {
+  outline: 2px solid #4caf50;
+  outline-offset: 2px;
+}
 .switch-sm {
   transform: scale(0.8);
 }
@@ -328,5 +419,12 @@ input:checked + .slider:before {
   }
   .eq-value {
     color: #eee;
+  }
+  .meter {
+    background: rgba(255, 255, 255, 0.14);
+  }
+  .notice {
+    border-color: rgba(255, 183, 77, 0.5);
+    background: rgba(255, 152, 0, 0.16);
   }
 }

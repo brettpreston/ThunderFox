@@ -2,7 +2,6 @@
 <html>
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>ThunderFox - by 7nihilate</title>
     <link rel="stylesheet" href="popup.css">
 </head>
@@ -11,133 +10,85 @@
         <h1>ThunderFox - by 7nihilate</h1>
         <div class="main-toggle">
             <label class="switch">
-                <input id="toggle" type="checkbox">
+                <input id="toggle" type="checkbox" aria-label="Enable ThunderFox processing">
                 <span class="slider"></span>
             </label>
-            <div class="status" id="status">Disabled</div>
+            <div class="status" id="status" role="status" aria-live="polite">Disabled</div>
         </div>
+
+        <p class="notice" id="blockedNotice" hidden></p>
+
+        <div class="meters" id="meters" aria-hidden="true">
+            <div class="meter-row">
+                <span class="meter-label">Low</span>
+                <div class="meter"><i id="meterLow"></i></div>
+            </div>
+            <div class="meter-row">
+                <span class="meter-label">Mid</span>
+                <div class="meter"><i id="meterMid"></i></div>
+            </div>
+            <div class="meter-row">
+                <span class="meter-label">High</span>
+                <div class="meter"><i id="meterHigh"></i></div>
+            </div>
+            <div class="meter-row">
+                <span class="meter-label">Lim</span>
+                <div class="meter"><i id="meterLimiter" class="meter-limit"></i></div>
+            </div>
+            <div class="meter-row">
+                <span class="meter-label">Out</span>
+                <div class="meter"><i id="meterOutput" class="meter-out"></i></div>
+            </div>
+        </div>
+
         <div class="controls">
-            <label class="row">
-                <span>Bass cut</span>
+            <div class="row">
+                <label for="hpToggle">Bass cut</label>
                 <input id="hpToggle" type="checkbox">
-            </label>
-            <label class="row">
-                <span>Loudness</span>
-                <input id="limiterThreshold" type="range" min="0" max="30" step="1">
+            </div>
+            <div class="row">
+                <label for="loudness">Loudness</label>
+                <input id="loudness" type="range" min="0" max="100" step="1"
+                       aria-describedby="loudness-value">
                 <span class="adv-value" id="loudness-value">40%</span>
-            </label>
+            </div>
+
             <div class="eq-section">
                 <div class="eq-header">
                     <div class="eq-title">Equalizer</div>
-                    <button id="eqReset" class="eq-reset-btn">Reset</button>
-                </div>
-                <div class="eq-bands">
-                    <div class="eq-band">
-                        <span class="eq-value" id="eq0-value">0</span>
-                        <div class="eq-slider-container">
-                            <input id="eq0" type="range" min="-12" max="12" step="0.5" value="0" class="eq-slider">
-                        </div>
-                        <span class="eq-label">68Hz</span>
-                    </div>
-                    <div class="eq-band">
-                        <span class="eq-value" id="eq1-value">0</span>
-                        <div class="eq-slider-container">
-                            <input id="eq1" type="range" min="-12" max="12" step="0.5" value="0" class="eq-slider">
-                        </div>
-                        <span class="eq-label">147Hz</span>
-                    </div>
-                    <div class="eq-band">
-                        <span class="eq-value" id="eq2-value">0</span>
-                        <div class="eq-slider-container">
-                            <input id="eq2" type="range" min="-12" max="12" step="0.5" value="0" class="eq-slider">
-                        </div>
-                        <span class="eq-label">315Hz</span>
-                    </div>
-                    <div class="eq-band">
-                        <span class="eq-value" id="eq3-value">0</span>
-                        <div class="eq-slider-container">
-                            <input id="eq3" type="range" min="-12" max="12" step="0.5" value="0" class="eq-slider">
-                        </div>
-                        <span class="eq-label">678Hz</span>
-                    </div>
-                    <div class="eq-band">
-                        <span class="eq-value" id="eq4-value">0</span>
-                        <div class="eq-slider-container">
-                            <input id="eq4" type="range" min="-12" max="12" step="0.5" value="0" class="eq-slider">
-                        </div>
-                        <span class="eq-label">1.4kHz</span>
-                    </div>
-                    <div class="eq-band">
-                        <span class="eq-value" id="eq5-value">0</span>
-                        <div class="eq-slider-container">
-                            <input id="eq5" type="range" min="-12" max="12" step="0.5" value="0" class="eq-slider">
-                        </div>
-                        <span class="eq-label">3.2kHz</span>
-                    </div>
-                    <div class="eq-band">
-                        <span class="eq-value" id="eq6-value">0</span>
-                        <div class="eq-slider-container">
-                            <input id="eq6" type="range" min="-12" max="12" step="0.5" value="0" class="eq-slider">
-                        </div>
-                        <span class="eq-label">6.8kHz</span>
-                    </div>
-                    <div class="eq-band">
-                        <span class="eq-value" id="eq7-value">0</span>
-                        <div class="eq-slider-container">
-                            <input id="eq7" type="range" min="-12" max="12" step="0.5" value="0" class="eq-slider">
-                        </div>
-                        <span class="eq-label">14.6kHz</span>
-                    </div>
-                </div>
-            </div>
-            <div class="advanced-section disabled" id="advancedSection">
-                <div class="eq-header">
-                    <div class="eq-title">Advanced</div>
-                    <button id="advancedReset" class="eq-reset-btn">Reset</button>
+                    <button id="eqReset" class="eq-reset-btn" type="button">Reset</button>
                     <label class="switch switch-sm">
-                        <input id="advancedToggle" type="checkbox">
+                        <input id="eqToggle" type="checkbox" aria-label="Enable equalizer">
                         <span class="slider"></span>
                     </label>
                 </div>
-                <div class="advanced-body">
-                    <label class="row adv-row">
-                        <span>Pre-boost</span>
-                        <input id="preBoost" type="range" min="0" max="100" step="1">
-                        <span class="adv-value" id="preBoost-value">+6.0 dB</span>
-                    </label>
-                    <label class="row adv-row">
-                        <span>Comp atk</span>
-                        <input id="compAttack" type="range" min="0" max="100" step="1">
-                        <span class="adv-value" id="compAttack-value">10 ms</span>
-                    </label>
-                    <label class="row adv-row">
-                        <span>Comp rel</span>
-                        <input id="compRelease" type="range" min="0" max="100" step="1">
-                        <span class="adv-value" id="compRelease-value">300 ms</span>
-                    </label>
-                    <label class="row adv-row">
-                        <span>Lim atk</span>
-                        <input id="limiterAttack" type="range" min="0" max="100" step="1">
-                        <span class="adv-value" id="limiterAttack-value">3 ms</span>
-                    </label>
-                    <label class="row adv-row">
-                        <span>Lim rel</span>
-                        <input id="limiterRelease" type="range" min="0" max="100" step="1">
-                        <span class="adv-value" id="limiterRelease-value">100 ms</span>
+                <div class="eq-bands" id="eqBands"></div>
+            </div>
+
+            <div class="advanced-section disabled" id="advancedSection">
+                <div class="eq-header">
+                    <div class="eq-title">Advanced</div>
+                    <button id="advancedReset" class="eq-reset-btn" type="button">Reset</button>
+                    <label class="switch switch-sm">
+                        <input id="advancedToggle" type="checkbox" aria-label="Enable advanced controls">
+                        <span class="slider"></span>
                     </label>
                 </div>
+                <div class="advanced-body" id="advancedBody"></div>
             </div>
+
             <div class="exempt-section">
-                <label class="row">
+                <div class="row">
                     <input id="exemptToggle" type="checkbox">
-                    <span id="exemptLabel">Exempt this site</span>
-                </label>
-                <p class="hint-text" id="exemptHint" hidden></p>
+                    <label for="exemptToggle" id="exemptLabel">Exempt this site</label>
+                </div>
+                <p class="hint-text" id="exemptHint" aria-live="polite" hidden></p>
             </div>
             <button id="manageExemptions" class="manage-btn" type="button">Manage exempt sites</button>
         </div>
     </div>
     <script src="../common/sites.js"></script>
+    <script src="../common/settings.js"></script>
     <script src="popup.js"></script>
 </body>
 </html>

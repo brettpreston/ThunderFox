@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "ThunderFox Audio Enhancer",
-  "version": "0.5.0",
-  "description": "Process web audio with a multiband compressor and limiter.",
+  "version": "0.6.0",
+  "description": "Multiband upward/downward compression, an equaliser and a look-ahead brickwall limiter for web audio.",
   "action": {
     "default_title": "ThunderFox Audio Enhancer",
     "default_popup": "popup/popup.html"
@@ -12,7 +12,8 @@
     "open_in_tab": true
   },
   "permissions": [
-    "storage"
+    "storage",
+    "tabs"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -27,20 +28,25 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["common/sites.js", "content/content.js"],
-      "run_at": "document_idle",
-      "all_frames": true
+      "js": ["common/sites.js", "common/settings.js", "content/content.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["content/limiter-processor.js"],
+      "resources": [
+        "content/ott-processor.js",
+        "content/limiter-processor.js"
+      ],
       "matches": ["<all_urls>"]
     }
   ],
   "browser_specific_settings": {
     "gecko": {
       "id": "@thunderfox.7nihilate",
+      "strict_min_version": "128.0",
       "data_collection_permissions": {
         "required": ["none"]
       }
