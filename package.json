@@ -1,0 +1,9 @@
+{
+  "name": "thunderfox",
+  "version": "0.6.0",
+  "private": true,
+  "description": "Offline DSP tests for the ThunderFox worklets. The extension itself has no build step.",
+  "scripts": {
+    "test": "node tests/run.js"
+  }
+}

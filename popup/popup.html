@@ -20,24 +20,14 @@
 
         <div class="meters" id="meters" aria-hidden="true">
             <div class="meter-row">
-                <span class="meter-label">Low</span>
-                <div class="meter"><i id="meterLow"></i></div>
-            </div>
-            <div class="meter-row">
-                <span class="meter-label">Mid</span>
-                <div class="meter"><i id="meterMid"></i></div>
-            </div>
-            <div class="meter-row">
-                <span class="meter-label">High</span>
-                <div class="meter"><i id="meterHigh"></i></div>
-            </div>
-            <div class="meter-row">
-                <span class="meter-label">Lim</span>
-                <div class="meter"><i id="meterLimiter" class="meter-limit"></i></div>
+                <span class="meter-label">In</span>
+                <div class="meter"><i id="meterInput"></i></div>
+                <span class="meter-value" id="meterInput-value">-&#8734;</span>
             </div>
             <div class="meter-row">
                 <span class="meter-label">Out</span>
                 <div class="meter"><i id="meterOutput" class="meter-out"></i></div>
+                <span class="meter-value" id="meterOutput-value">-&#8734;</span>
             </div>
         </div>
 
@@ -50,7 +40,7 @@
                 <label for="loudness">Loudness</label>
                 <input id="loudness" type="range" min="0" max="100" step="1"
                        aria-describedby="loudness-value">
-                <span class="adv-value" id="loudness-value">40%</span>
+                <span class="adv-value" id="loudness-value"></span>
             </div>
 
             <div class="eq-section">

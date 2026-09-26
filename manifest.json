@@ -23,7 +23,7 @@
     "128": "icons/icon-128.png"
   },
   "background": {
-    "scripts": ["background/background.js"]
+    "scripts": ["common/settings.js", "background/background.js"]
   },
   "content_scripts": [
     {

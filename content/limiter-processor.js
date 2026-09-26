@@ -50,10 +50,13 @@ const RECOVERY_DECADES = Math.log(100);
 // The first stage of the release is this many times faster than the second. A
 // brief dip finishes inside the fast stage; a sustained reduction spends most of
 // its recovery in the slow one, which is what stops bass pumping.
+//
+// "Brief" is measured from the moment the gain left unity, not from the last
+// time the envelope pushed it down. The stage used to restart on every push,
+// and under continuous limiting the envelope pushes on every cycle, so the
+// slow stage was never reached: a 120 ms release recovered in 24 ms and bass
+// through a driven limiter came out at -25 dB THD.
 const FAST_RELEASE_RATIO = 6;
-
-const DB_PER_LOG = 20 / Math.LN10;
-const METER_INTERVAL_SECONDS = 0.05;
 
 // Below this the release one-pole is denormal and costs a hardware penalty for
 // no audible benefit.
@@ -89,7 +92,7 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
             },
             {
                 name: 'hold',
-                defaultValue: 0.002,
+                defaultValue: 0.02,
                 minValue: 0,
                 maxValue: 0.05,
                 automationRate: 'k-rate'
@@ -135,7 +138,8 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
         this.gain = 1;
         this.sampleIndex = 0;
         this.holdCountdown = 0;
-        this.releaseAge = 0;
+        // Samples since the gain last sat at unity. Chooses the release stage.
+        this.reductionAge = 0;
 
         // Doubled ring, so a tap loop can read ISP_TAPS consecutive samples
         // without a modulo on every tap.
@@ -143,11 +147,6 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
         this.historyPos = 0;
 
         this.ispCoefficients = BrickwallLimiterProcessor.buildIspCoefficients();
-
-        this.meterMinGain = 1;
-        this.meterPeak = 0;
-        this.meterCountdown = 0;
-        this.meterInterval = Math.max(1, Math.round(METER_INTERVAL_SECONDS * sampleRate));
 
         this.port.onmessage = (event) => {
             if (event.data && event.data.type === 'reset') this.reset();
@@ -211,9 +210,7 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
         this.gain = 1;
         this.sampleIndex = 0;
         this.holdCountdown = 0;
-        this.releaseAge = 0;
-        this.meterMinGain = 1;
-        this.meterPeak = 0;
+        this.reductionAge = 0;
     }
 
     ensureChannels(channelCount) {
@@ -288,16 +285,6 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
         return this.dequeValues[this.dequeHead];
     }
 
-    publishMeters() {
-        this.port.postMessage({
-            type: 'meters',
-            reductionDb: this.meterMinGain >= 1 ? 0 : Math.log(this.meterMinGain) * DB_PER_LOG,
-            peakDb: this.meterPeak > 0 ? Math.log(this.meterPeak) * DB_PER_LOG : -120
-        });
-        this.meterMinGain = 1;
-        this.meterPeak = 0;
-    }
-
     process(inputs, outputs, parameters) {
         const input = inputs[0];
         const output = outputs[0];
@@ -316,8 +303,10 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
         const slowSamples = Math.max(1, (releaseSeconds * sampleRate) / RECOVERY_DECADES);
         const slowCoefficient = Math.exp(-1 / slowSamples);
         const fastCoefficient = Math.exp(-1 / (slowSamples / FAST_RELEASE_RATIO));
-        const fastStageSamples = Math.max(1, (releaseSeconds * sampleRate) / FAST_RELEASE_RATIO);
         const holdSamples = Math.round(parameters.hold[0] * sampleRate);
+        // The fast stage is a sixth of the release, counted from the end of
+        // the hold, so a longer hold does not eat it.
+        const fastStageEnd = holdSamples + Math.max(1, (releaseSeconds * sampleRate) / FAST_RELEASE_RATIO);
 
         const requestedBox = Math.round(parameters.smoothing[0] * sampleRate);
         const boxLength = Math.max(1, Math.min(this.lookahead, requestedBox));
@@ -402,41 +391,37 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
                 this.holdCountdown--;
                 recovered = this.gain;
             } else {
-                const coefficient = this.releaseAge < fastStageSamples
+                const coefficient = this.reductionAge < fastStageEnd
                     ? fastCoefficient
                     : slowCoefficient;
-                this.releaseAge++;
                 recovered = 1 + (this.gain - 1) * coefficient;
                 if (recovered > 1 - GAIN_SETTLED) recovered = 1;
             }
 
-            if (smoothed < recovered) {
+            // The hold restarts whenever the envelope still asks for at least
+            // the current reduction, equality included. A steady tone asks for
+            // exactly the same gain at every peak, and with a strict comparison
+            // those peaks did not restart the hold, so the gain crept up
+            // between them and was snapped back down at each one: the same
+            // within-cycle movement the hold exists to prevent.
+            if (smoothed <= recovered) {
                 this.gain = smoothed;
                 this.holdCountdown = holdSamples;
-                this.releaseAge = 0;
             } else {
                 this.gain = recovered;
             }
 
-            if (this.gain < this.meterMinGain) this.meterMinGain = this.gain;
+            if (this.gain >= 1) this.reductionAge = 0;
+            else this.reductionAge++;
 
             const readPos = this.delayPos + 1 === delayLength ? 0 : this.delayPos + 1;
             const gain = this.gain;
             for (let c = 0; c < channelCount; c++) {
-                const y = this.delay[c][readPos] * gain;
-                output[c][i] = y;
-                const magnitude = y < 0 ? -y : y;
-                if (magnitude > this.meterPeak) this.meterPeak = magnitude;
+                output[c][i] = this.delay[c][readPos] * gain;
             }
 
             this.delayPos = readPos;
             this.sampleIndex++;
-        }
-
-        this.meterCountdown -= frames;
-        if (this.meterCountdown <= 0) {
-            this.meterCountdown = this.meterInterval;
-            this.publishMeters();
         }
 
         return true;

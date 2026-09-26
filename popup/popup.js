@@ -62,9 +62,12 @@ const ADVANCED_LAYOUT = [
     }
 ];
 
-// Deepest reduction a gain-reduction meter shows, full scale.
-const METER_RANGE_DB = 24;
-const OUTPUT_FLOOR_DB = -60;
+// Level meters run from this floor to 0 dBFS.
+const METER_FLOOR_DB = -60;
+
+// Peak fallback, in dB per update. Without it the bars flicker at whatever rate
+// the content script polls; with it they read like a meter.
+const METER_DECAY_DB = 1.8;
 
 const STORAGE_DEBOUNCE_MS = 120;
 
@@ -313,17 +316,23 @@ function renderAdvanced() {
     });
 }
 
-function renderMeter(element, reductionDb) {
-    if (!element) return;
-    const magnitude = Math.min(Math.abs(reductionDb || 0), METER_RANGE_DB);
-    element.style.width = `${(magnitude / METER_RANGE_DB) * 100}%`;
-}
+const meterLevels = { meterInput: METER_FLOOR_DB, meterOutput: METER_FLOOR_DB };
 
-function renderOutputMeter(peakDb) {
-    const element = document.getElementById('meterOutput');
-    if (!element) return;
-    const clamped = Math.max(OUTPUT_FLOOR_DB, Math.min(0, peakDb || OUTPUT_FLOOR_DB));
-    element.style.width = `${((clamped - OUTPUT_FLOOR_DB) / -OUTPUT_FLOOR_DB) * 100}%`;
+function renderLevelMeter(id, peakDb) {
+    const bar = document.getElementById(id);
+    const readout = document.getElementById(`${id}-value`);
+    if (!bar) return;
+
+    const incoming = typeof peakDb === 'number' && isFinite(peakDb) ? peakDb : METER_FLOOR_DB;
+    // Rise instantly, fall gradually.
+    const held = Math.max(incoming, meterLevels[id] - METER_DECAY_DB);
+    const level = Math.max(METER_FLOOR_DB, Math.min(0, held));
+    meterLevels[id] = level;
+
+    bar.style.width = `${((level - METER_FLOOR_DB) / -METER_FLOOR_DB) * 100}%`;
+    if (readout) {
+        readout.textContent = level <= METER_FLOOR_DB ? '-∞' : level.toFixed(1);
+    }
 }
 
 /* ------------------------------------------------------------------ meters */
@@ -338,17 +347,8 @@ function connectMeters() {
 
     meterPort.onMessage.addListener((message) => {
         if (!message || message.type !== 'meters') return;
-        if (Array.isArray(message.ott)) {
-            renderMeter(document.getElementById('meterLow'), message.ott[0]);
-            renderMeter(document.getElementById('meterMid'), message.ott[1]);
-            renderMeter(document.getElementById('meterHigh'), message.ott[2]);
-        }
-        if (typeof message.limiterDb === 'number') {
-            renderMeter(document.getElementById('meterLimiter'), message.limiterDb);
-        }
-        if (typeof message.outputDb === 'number') {
-            renderOutputMeter(message.outputDb);
-        }
+        renderLevelMeter('meterInput', message.inputDb);
+        renderLevelMeter('meterOutput', message.outputDb);
     });
 
     meterPort.onDisconnect.addListener(() => { meterPort = null; });
@@ -587,6 +587,12 @@ function renderBlockedNotice(blockedHost) {
 async function init() {
     buildEq();
     buildAdvanced();
+
+    // Paint the defaults before the first await, so the readouts never show a
+    // value that lives only in the markup. Stored values replace them below.
+    renderLoudness();
+    renderEq();
+    renderAdvanced();
 
     // Resolve the tab first so every later message has somewhere to go. A
     // failure here must not take the rest of the popup down with it.

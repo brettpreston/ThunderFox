@@ -14,6 +14,14 @@
     const SILENCE_TIMEOUT_MS = 2000;
     const WATCHDOG_INTERVAL_MS = 500;
 
+    const METER_FFT_SIZE = 4096;
+    const METER_INTERVAL_MS = 60;
+    const METER_FLOOR_DB = -60;
+
+    // How long a media element gets to reload under CORS before we decide the
+    // reload failed and hand it back its original, untouched load.
+    const CORS_RELOAD_TIMEOUT_MS = 10000;
+
     const STATE = {
         audioContext: null,
         contextReady: null,
@@ -25,7 +33,8 @@
         hpFilter: null,
         eq: null,
         limiter: null,
-        analyser: null,
+        inputAnalyser: null,
+        outputAnalyser: null,
 
         // Permanent. A MediaElementAudioSourceNode binds to its element for the
         // life of the document and cannot be recreated, so an entry here is
@@ -34,6 +43,7 @@
         mediaNodes: new Map(),
         wiring: new Set(),
         skipped: new WeakSet(),
+        corsTried: new WeakSet(),
         watched: new WeakSet(),
         protectedElements: new WeakSet(),
         observedRoots: new WeakSet(),
@@ -44,6 +54,7 @@
         inert: false,
 
         meterPorts: new Set(),
+        meterTimer: null,
         watchdogTimer: null,
         silenceSince: 0,
         silenceReported: false,
@@ -121,13 +132,21 @@
         STATE.eq = createEqualizer(ctx);
         STATE.limiter = createLimiter(ctx);
 
-        STATE.analyser = ctx.createAnalyser();
-        STATE.analyser.fftSize = 2048;
+        // Level meters are taken here rather than inside the worklets, so the
+        // audio thread does no metering work at all and the polling only runs
+        // while the popup is open. 4096 samples is 85 ms at 48 kHz, longer than
+        // the poll interval, so the windows overlap and no peak falls between
+        // two reads.
+        STATE.inputAnalyser = ctx.createAnalyser();
+        STATE.inputAnalyser.fftSize = METER_FFT_SIZE;
+        STATE.outputAnalyser = ctx.createAnalyser();
+        STATE.outputAnalyser.fftSize = METER_FFT_SIZE;
 
         STATE.inputGain.connect(STATE.preGain);
-        STATE.inputGain.connect(STATE.analyser);
+        STATE.inputGain.connect(STATE.inputAnalyser);
         STATE.preGain.connect(STATE.ott.node);
         STATE.limiter.output.connect(ctx.destination);
+        STATE.limiter.output.connect(STATE.outputAnalyser);
 
         updateRouting();
         applySettingsToGraph(STATE.settings, true);
@@ -137,6 +156,9 @@
         };
         installGestureListeners();
         resumeContext();
+
+        // A popup opened before anything played is already waiting for meters.
+        startMeters();
 
         return ctx;
     }
@@ -150,12 +172,6 @@
             channelCountMode: 'explicit',
             channelInterpretation: 'speakers'
         });
-
-        node.port.onmessage = (event) => {
-            if (event.data && event.data.type === 'meters') {
-                broadcastMeters({ ott: event.data.reduction, peakDb: event.data.peakDb });
-            }
-        };
 
         return { node, parameters: node.parameters };
     }
@@ -201,7 +217,7 @@
 
         // Drive sits ahead of the limiter, so raising Loudness pushes signal
         // into a fixed ceiling rather than adding gain after the only stage
-        // protecting the output. This is the LoudMax threshold control: lowering
+        // protecting the output. This is the classic limiter threshold control: lowering
         // the threshold and making up the difference is the same operation.
         const drive = ctx.createGain();
 
@@ -209,12 +225,6 @@
             numberOfInputs: 1,
             numberOfOutputs: 1
         });
-
-        node.port.onmessage = (event) => {
-            if (event.data && event.data.type === 'meters') {
-                broadcastMeters({ limiterDb: event.data.reductionDb, outputDb: event.data.peakDb });
-            }
-        };
 
         input.connect(drive);
         drive.connect(node);
@@ -337,13 +347,22 @@
         if (STATE.wiring.has(mediaEl) || STATE.contextFailed) return;
 
         const reason = wireBlockReason(mediaEl);
+
+        // Cross-origin is only fatal when the server refuses CORS. Reddit's
+        // v.redd.it, for one, sends Access-Control-Allow-Origin: * on its
+        // direct MP4s, so the element can be reloaded in CORS mode and taken
+        // safely. One attempt per element.
+        if (reason === 'cross-origin' && !STATE.corsTried.has(mediaEl)) {
+            STATE.corsTried.add(mediaEl);
+            upgradeToCors(mediaEl).then((upgraded) => {
+                if (upgraded) wireMediaElement(mediaEl);
+                else skipElement(mediaEl, reason);
+            }).catch(() => skipElement(mediaEl, reason));
+            return;
+        }
+
         if (reason) {
-            // 'no-source' is transient — the next `playing` retries — but the
-            // others are permanent for this element.
-            if (reason !== 'no-source' && !STATE.skipped.has(mediaEl)) {
-                STATE.skipped.add(mediaEl);
-                console.info(`ThunderFox: leaving this media alone (${reason})`, mediaEl.currentSrc || '');
-            }
+            skipElement(mediaEl, reason);
             return;
         }
 
@@ -416,12 +435,174 @@
         nodes.target = null;
     }
 
+    function skipElement(mediaEl, reason) {
+        // 'no-source' is transient — the next `playing` retries — but the
+        // others are permanent for this element.
+        if (reason === 'no-source' || STATE.skipped.has(mediaEl)) return;
+        STATE.skipped.add(mediaEl);
+        console.info(`ThunderFox: leaving this media alone (${reason})`, mediaEl.currentSrc || '');
+    }
+
+    /* ------------------------------------------------------- CORS upgrade */
+
+    // Whether the page itself could fetch this URL with CORS. It has to be the
+    // page's own fetch: a content-script fetch carries the extension's host
+    // permissions and never fails a CORS check, so it would prove nothing.
+    function probeCors(url) {
+        let pageWindow;
+        try { pageWindow = window.wrappedJSObject; } catch (_) { return Promise.resolve(false); }
+        if (!pageWindow || typeof cloneInto !== 'function' || typeof pageWindow.fetch !== 'function') {
+            return Promise.resolve(false);
+        }
+        try {
+            const init = cloneInto(
+                { method: 'HEAD', mode: 'cors', credentials: 'omit', cache: 'no-store' },
+                pageWindow
+            );
+            return Promise.resolve(pageWindow.fetch(url, init)).then(() => true, () => false);
+        } catch (_) {
+            return Promise.resolve(false);
+        }
+    }
+
+    function waitForLoad(mediaEl) {
+        return new Promise((resolve) => {
+            let timer = null;
+            const done = (ok) => {
+                mediaEl.removeEventListener('loadedmetadata', onLoaded, true);
+                mediaEl.removeEventListener('error', onError, true);
+                clearTimeout(timer);
+                resolve(ok);
+            };
+            const onLoaded = () => done(true);
+            const onError = () => done(false);
+            timer = setTimeout(() => done(mediaEl.readyState >= 1), CORS_RELOAD_TIMEOUT_MS);
+            mediaEl.addEventListener('loadedmetadata', onLoaded, { capture: true });
+            // Capture also sees a <source> child's error.
+            mediaEl.addEventListener('error', onError, { capture: true });
+        });
+    }
+
+    // Seeking before metadata arrives sets the default playback start
+    // position, which the element honours once it can, so neither call has to
+    // wait for the reload to finish.
+    function resumePlayback(mediaEl, position, wasPlaying) {
+        if (position > 0) {
+            try { mediaEl.currentTime = position; } catch (_) {}
+        }
+        if (wasPlaying) {
+            try {
+                const promise = mediaEl.play();
+                if (promise && typeof promise.catch === 'function') promise.catch(() => {});
+            } catch (_) {}
+        }
+    }
+
+    /**
+     * Reload a cross-origin element in CORS mode so its audio can be taken
+     * without being zeroed.
+     *
+     * The crossorigin attribute is only read when a load starts, so changing
+     * it means calling load(), which restarts the resource from the top; the
+     * position and play state are put back straight after. If the CORS load
+     * fails the attribute is cleared and the element reloaded again, which
+     * leaves it exactly as the page had it, just not processed.
+     */
+    async function upgradeToCors(mediaEl) {
+        const source = mediaEl.currentSrc || mediaEl.src || '';
+        if (!source || !(await probeCors(source))) return false;
+
+        // The page may have moved on while the probe was in flight.
+        if ((mediaEl.currentSrc || mediaEl.src || '') !== source) return false;
+        if (STATE.mediaNodes.has(mediaEl) || STATE.wiring.has(mediaEl)) return false;
+
+        // Held for the whole reload so a rescan or `playing` cannot capture the
+        // element before the CORS load is known to have succeeded.
+        STATE.wiring.add(mediaEl);
+        try {
+            const wasPlaying = !mediaEl.paused && !mediaEl.ended;
+            const position = mediaEl.currentTime;
+
+            let loaded = waitForLoad(mediaEl);
+            mediaEl.crossOrigin = 'anonymous';
+            mediaEl.load();
+            resumePlayback(mediaEl, position, wasPlaying);
+
+            if (await loaded) {
+                console.info('ThunderFox: reloaded cross-origin media with CORS', source);
+                return true;
+            }
+
+            loaded = waitForLoad(mediaEl);
+            mediaEl.crossOrigin = null;
+            mediaEl.load();
+            resumePlayback(mediaEl, position, wasPlaying);
+            await loaded;
+            return false;
+        } finally {
+            STATE.wiring.delete(mediaEl);
+        }
+    }
+
     /* ---------------------------------------------------------- discovery */
 
+    // Firefox lets content scripts see closed roots too.
+    function shadowRootOf(el) {
+        if (!el || el.nodeType !== 1) return null;
+        try {
+            return el.openOrClosedShadowRoot || el.shadowRoot || null;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    // Reddit, and Lit-based players generally, create the <video> inside a
+    // shadow root that is attached when the component's bundle finishes
+    // loading, long after the host element was inserted and scanned. Attaching
+    // a shadow root produces no mutation record, so the observer alone never
+    // learns the root exists. Hooking attachShadow in the page's own world is
+    // the one signal that catches every root, closed ones included.
+    let restoreAttachShadow = null;
+
+    function hookAttachShadow() {
+        let pageWindow;
+        try { pageWindow = window.wrappedJSObject; } catch (_) { return; }
+        if (!pageWindow || typeof exportFunction !== 'function') return;
+
+        let proto;
+        let original;
+        try {
+            proto = pageWindow.Element.prototype;
+            original = proto.attachShadow;
+        } catch (_) {
+            return;
+        }
+        if (typeof original !== 'function') return;
+
+        const hooked = function(init) {
+            const root = Reflect.apply(original, this, [init]);
+            if (!STATE.inert) {
+                try { observeRoot(root); } catch (_) {}
+            }
+            return root;
+        };
+
+        try {
+            proto.attachShadow = exportFunction(hooked, pageWindow);
+        } catch (_) {
+            return;
+        }
+        restoreAttachShadow = () => {
+            try { proto.attachShadow = original; } catch (_) {}
+        };
+    }
+
     // Walking every element to find shadow roots is the only way to reach media
-    // inside a web component, but it is far too expensive to run per mutation on
-    // a page like YouTube. The budget caps one pass; anything past it is picked
-    // up by the next coalesced scan.
+    // inside a web component that existed before the attachShadow hook (server-
+    // rendered declarative shadow DOM, mainly), but it is far too expensive to
+    // run per mutation on a page like YouTube. The budget caps one pass. It
+    // used to give up on any subtree larger than the budget without looking at
+    // a single element, which on Reddit meant the whole initial feed.
     const SHADOW_WALK_BUDGET = 3000;
 
     function collectMedia(root, found, budget) {
@@ -431,15 +612,16 @@
 
         if (budget <= 0) return 0;
         const all = root.querySelectorAll('*');
-        let remaining = budget - all.length;
-        if (remaining < 0) return 0;
+        const limit = Math.min(all.length, budget);
+        let remaining = budget - limit;
 
-        for (const el of all) {
-            if (el.shadowRoot) {
-                observeRoot(el.shadowRoot);
-                remaining = collectMedia(el.shadowRoot, found, remaining);
-                if (remaining <= 0) return 0;
-            }
+        for (let i = 0; i < limit; i++) {
+            const shadow = shadowRootOf(all[i]);
+            if (!shadow) continue;
+            observeRoot(shadow);
+            // Past the budget this still observes the root and collects its
+            // direct media; only the deeper walk is skipped.
+            remaining = collectMedia(shadow, found, remaining);
         }
 
         return remaining;
@@ -448,7 +630,16 @@
     function scan(root) {
         const found = [];
         if (root && (root.tagName === 'AUDIO' || root.tagName === 'VIDEO')) found.push(root);
-        collectMedia(root, found, SHADOW_WALK_BUDGET);
+        const remaining = collectMedia(root, found, SHADOW_WALK_BUDGET);
+
+        // A host arrives as its own mutation record, before its children, so
+        // its shadow root is only reachable by asking the root itself.
+        const shadow = shadowRootOf(root);
+        if (shadow) {
+            observeRoot(shadow);
+            collectMedia(shadow, found, remaining);
+        }
+
         found.forEach(trackElement);
     }
 
@@ -459,7 +650,7 @@
         const roots = Array.from(STATE.pendingRoots);
         STATE.pendingRoots.clear();
         roots.forEach((root) => {
-            if (root.isConnected === false && !root.shadowRoot) return;
+            if (root.isConnected === false && !shadowRootOf(root)) return;
             scan(root);
         });
     }
@@ -502,7 +693,7 @@
     // point at the exemption, which does work (it reloads the tab).
     function startWatchdog() {
         if (STATE.watchdogTimer || STATE.silenceReported) return;
-        const buffer = new Float32Array(STATE.analyser.fftSize);
+        const buffer = new Float32Array(STATE.inputAnalyser.fftSize);
 
         STATE.watchdogTimer = setInterval(() => {
             let playing = false;
@@ -515,7 +706,7 @@
                 return;
             }
 
-            STATE.analyser.getFloatTimeDomainData(buffer);
+            STATE.inputAnalyser.getFloatTimeDomainData(buffer);
             let peak = 0;
             for (let i = 0; i < buffer.length; i++) {
                 const magnitude = Math.abs(buffer[i]);
@@ -692,11 +883,44 @@
 
     /* ------------------------------------------------------------- metering */
 
-    function broadcastMeters(patch) {
-        if (STATE.meterPorts.size === 0) return;
-        STATE.meterPorts.forEach((port) => {
-            try { port.postMessage(Object.assign({ type: 'meters' }, patch)); } catch (_) {}
-        });
+    function analyserPeakDb(analyser, buffer) {
+        analyser.getFloatTimeDomainData(buffer);
+        let peak = 0;
+        for (let i = 0; i < buffer.length; i++) {
+            const magnitude = buffer[i] < 0 ? -buffer[i] : buffer[i];
+            if (magnitude > peak) peak = magnitude;
+        }
+        return peak > 0 ? 20 * Math.log10(peak) : METER_FLOOR_DB;
+    }
+
+    // Polling only runs while a popup is listening, so a page nobody is looking
+    // at pays nothing for the meters.
+    function startMeters() {
+        if (STATE.meterTimer || !STATE.inputAnalyser) return;
+
+        const buffer = new Float32Array(METER_FFT_SIZE);
+        STATE.meterTimer = setInterval(() => {
+            if (STATE.meterPorts.size === 0) {
+                stopMeters();
+                return;
+            }
+
+            const message = {
+                type: 'meters',
+                inputDb: analyserPeakDb(STATE.inputAnalyser, buffer),
+                outputDb: analyserPeakDb(STATE.outputAnalyser, buffer)
+            };
+
+            STATE.meterPorts.forEach((port) => {
+                try { port.postMessage(message); } catch (_) {}
+            });
+        }, METER_INTERVAL_MS);
+    }
+
+    function stopMeters() {
+        if (!STATE.meterTimer) return;
+        clearInterval(STATE.meterTimer);
+        STATE.meterTimer = null;
     }
 
     /* ---------------------------------------------------------------- init */
@@ -732,7 +956,7 @@
 
         const patch = {};
         Object.keys(changes).forEach((key) => {
-            if (key === 'exemptedSites' || key === 'audioBlockedHost') return;
+            if (key === 'exemptedSites' || key === 'audioBlockedHost' || key === 'settingsVersion') return;
             patch[key] = changes[key].newValue;
         });
         if (Object.keys(patch).length === 0) return;
@@ -747,7 +971,11 @@
     function handleConnect(port) {
         if (!port || port.name !== 'thunderfox-meters' || STATE.inert) return;
         STATE.meterPorts.add(port);
-        port.onDisconnect.addListener(() => STATE.meterPorts.delete(port));
+        port.onDisconnect.addListener(() => {
+            STATE.meterPorts.delete(port);
+            if (STATE.meterPorts.size === 0) stopMeters();
+        });
+        startMeters();
     }
 
     async function init() {
@@ -759,6 +987,11 @@
         browser.runtime.onConnect.addListener(handleConnect);
 
         STATE.observer = new MutationObserver(handleMutations);
+
+        // Also before the first await: page scripts start running as soon as we
+        // yield, and any shadow root they attach before the hook is in place
+        // is invisible to it.
+        hookAttachShadow();
 
         const stored = await browser.storage.local.get(
             Object.assign({ exemptedSites: null, audioBlockedHost: '' }, S.DEFAULTS)
@@ -774,6 +1007,7 @@
         // the exemption list changes.
         if (await isPageExempted(exemptedSites)) {
             STATE.inert = true;
+            if (restoreAttachShadow) restoreAttachShadow();
             console.info('ThunderFox: site is exempted, staying inert', {
                 hostname: window.location.hostname
             });

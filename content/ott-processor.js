@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Three-band upward and downward compressor, in the shape of Xfer's OTT.
+ * Three-band upward and downward compressor, in the style of OTT.
  *
  * The band split is a 4th-order Linkwitz-Riley tree. LR4 is two cascaded
  * Butterworth sections at the same cutoff, and its two halves sum to a
@@ -46,8 +46,19 @@ const UP_RATIO = 4;
 const UP_KNEE_DB = 6;
 
 const UP_MAX_DB = 18;
-const UP_FLOOR_TOP_DB = -55;
-const UP_FLOOR_BOTTOM_DB = -75;
+const UP_FLOOR_TOP_DB = -60;
+const UP_FLOOR_BOTTOM_DB = -80;
+
+// The floor fade follows its own slow envelope rather than the band detector.
+// Between UP_FLOOR_TOP_DB and UP_FLOOR_BOTTOM_DB the positive gain (up to
+// UP_MAX_DB plus makeup) fades to nothing over 20 dB of level, which is an
+// expander with a ratio near 1:2.6. Driven by the fast detector that expander
+// tracked every wobble in quiet low-band content, so a room tone or a reverb
+// tail fluttered by tens of dB at the Time knob's rate, scaling with Down
+// because makeup does. A 20 ms rise lets the first note after a gap open the
+// band at once; the 400 ms fall means only a genuine pause closes it.
+const FLOOR_ATTACK_SECONDS = 0.02;
+const FLOOR_RELEASE_SECONDS = 0.4;
 
 // Time knob, geometric about its midpoint so 50% lands on OTT's nominal
 // 1 ms attack / 78 ms release.
@@ -56,18 +67,82 @@ const ATTACK_SPAN = 50;
 const RELEASE_CENTRE_MS = 78;
 const RELEASE_SPAN = 12.8;
 
+// Per-band detector window, in seconds: a little over one half-period of the
+// lowest frequency each band carries (20 Hz, the 88 Hz crossover, the 2.5 kHz
+// crossover). The detector follows the peak over this window rather than the
+// rectified sample. A follower on the raw rectified signal starts releasing
+// between one half-cycle's peak and the next, so its gain rides the waveform
+// itself: on a 30 Hz tone at the Time knob's midpoint that was -37 dB of
+// harmonic distortion. A hold fixed the steady case but on a decaying bass
+// note it produced a sawtooth instead, as the envelope sagged after each hold
+// and every new peak snapped it back up. The windowed peak has neither: it
+// steps only when a peak enters or leaves the window, by the amount the
+// level actually changed, and Time then sets how fast the gain follows.
+const BAND_WINDOW_SECONDS = [0.026, 0.006, 0.00025];
+
+// Per-band attack floor. The low band's gain must not move by tens of dB
+// inside a fraction of a bass cycle, whatever Time is set to: at the knob's
+// 1 ms midpoint the low band gain was dropping more than 1 dB per sample at
+// each kick onset, which is a click, not compression. 10 ms is about half a
+// cycle at 50 Hz. The Time knob still lengthens the attack past the floor.
+const BAND_MIN_ATTACK_SECONDS = [0.010, 0, 0];
+
 const DB_PER_LOG = 20 / Math.LN10;
 const LOG_PER_DB = Math.LN10 / 20;
 
 // -180 dBFS: below any real dither, so the log is always finite.
 const LEVEL_EPSILON = 1e-9;
 
-const METER_INTERVAL_SECONDS = 0.05;
-
 const BAND_COUNT = 3;
 
 function dbToGain(db) {
     return Math.exp(db * LOG_PER_DB);
+}
+
+/**
+ * Maximum over the last `window` samples, amortised O(1) per sample: a
+ * monotonic deque of candidates, each dropped once a larger value arrives or
+ * once it ages out of the window.
+ */
+class RunningMax {
+    constructor(window) {
+        this.window = Math.max(1, window);
+        const capacity = this.window + 1;
+        this.values = new Float64Array(capacity);
+        this.indices = new Float64Array(capacity);
+        this.head = 0;
+        this.count = 0;
+    }
+
+    reset() {
+        this.head = 0;
+        this.count = 0;
+    }
+
+    push(value, index) {
+        const capacity = this.values.length;
+
+        while (this.count > 0) {
+            let tail = this.head + this.count - 1;
+            if (tail >= capacity) tail -= capacity;
+            if (this.values[tail] <= value) this.count--;
+            else break;
+        }
+
+        let slot = this.head + this.count;
+        if (slot >= capacity) slot -= capacity;
+        this.values[slot] = value;
+        this.indices[slot] = index;
+        this.count++;
+
+        const oldest = index - this.window + 1;
+        while (this.count > 0 && this.indices[this.head] < oldest) {
+            this.head = this.head + 1 === capacity ? 0 : this.head + 1;
+            this.count--;
+        }
+
+        return this.values[this.head];
+    }
 }
 
 /**
@@ -153,8 +228,8 @@ class OttProcessor extends AudioWorkletProcessor {
 
         ['low', 'mid', 'high'].forEach((band) => {
             descriptors.push(
-                { name: `${band}Up`, defaultValue: 1, minValue: 0, maxValue: 1, automationRate: 'k-rate' },
-                { name: `${band}Down`, defaultValue: 1, minValue: 0, maxValue: 1, automationRate: 'k-rate' },
+                { name: `${band}Up`, defaultValue: 0.8, minValue: 0, maxValue: 1, automationRate: 'k-rate' },
+                { name: `${band}Down`, defaultValue: 0.8, minValue: 0, maxValue: 1, automationRate: 'k-rate' },
                 { name: `${band}GainDb`, defaultValue: 0, minValue: -20, maxValue: 20, automationRate: 'k-rate' }
             );
         });
@@ -181,12 +256,18 @@ class OttProcessor extends AudioWorkletProcessor {
             this.lowAllpass
         ];
 
-        this.designCrossover();
-
         // Detector state, one per band. Gain reduction is channel-linked, so
         // there is one envelope per band rather than one per band per channel.
+        // Allocated before designCrossover(), which sizes the windows.
         this.envelope = new Float64Array(BAND_COUNT);
+        this.floorEnvelope = new Float64Array(BAND_COUNT);
+        this.floorAttackCoefficient = 0;
+        this.floorReleaseCoefficient = 0;
+        this.windowMax = [];
+        this.sampleIndex = 0;
         this.bandGain = new Float64Array(BAND_COUNT).fill(1);
+
+        this.designCrossover();
 
         // Scratch, so the per-sample loop allocates nothing. The split output is
         // held per channel because the gain pass needs it again after the
@@ -196,16 +277,18 @@ class OttProcessor extends AudioWorkletProcessor {
         this.scratchMid = new Float64Array(0);
         this.scratchHigh = new Float64Array(0);
 
-        this.attackCoefficient = 0;
+        // The k-rate parameters, gathered per band. Preallocated so reading
+        // them does not allocate three arrays on every render quantum, which
+        // is about 1,100 allocations a second on the audio thread.
+        this.upAmount = new Float64Array(BAND_COUNT);
+        this.downAmount = new Float64Array(BAND_COUNT);
+        this.bandGainDb = new Float64Array(BAND_COUNT);
+
+        this.attackCoefficient = new Float64Array(BAND_COUNT);
         this.releaseCoefficient = 0;
         this.lastTime = -1;
 
         this.makeupDb = 0;
-
-        this.meterMinGain = new Float64Array(BAND_COUNT).fill(1);
-        this.meterPeak = 0;
-        this.meterCountdown = 0;
-        this.meterInterval = Math.max(1, Math.round(METER_INTERVAL_SECONDS * sampleRate));
 
         this.port.onmessage = (event) => {
             if (event.data && event.data.type === 'reset') this.reset();
@@ -213,6 +296,17 @@ class OttProcessor extends AudioWorkletProcessor {
     }
 
     designCrossover() {
+        this.designedRate = sampleRate;
+        // The Time coefficients are in samples, so they are stale at a new rate
+        // too; forcing updateTiming() to recompute them on the next quantum.
+        this.lastTime = -1;
+        this.windowMax = [];
+        for (let b = 0; b < BAND_COUNT; b++) {
+            this.windowMax.push(new RunningMax(Math.round(BAND_WINDOW_SECONDS[b] * sampleRate)));
+        }
+        this.sampleIndex = 0;
+        this.floorAttackCoefficient = Math.exp(-1 / (FLOOR_ATTACK_SECONDS * sampleRate));
+        this.floorReleaseCoefficient = Math.exp(-1 / (FLOOR_RELEASE_SECONDS * sampleRate));
         this.lowSplitLp.forEach((section) => section.setLowpass(LOW_CROSSOVER_HZ, BUTTERWORTH_Q, sampleRate));
         this.lowSplitHp.forEach((section) => section.setHighpass(LOW_CROSSOVER_HZ, BUTTERWORTH_Q, sampleRate));
         this.highSplitLp.forEach((section) => section.setLowpass(HIGH_CROSSOVER_HZ, BUTTERWORTH_Q, sampleRate));
@@ -223,9 +317,10 @@ class OttProcessor extends AudioWorkletProcessor {
     reset() {
         this.sections.forEach((section) => section.reset());
         this.envelope.fill(0);
+        this.floorEnvelope.fill(0);
+        this.windowMax.forEach((window) => window.reset());
+        this.sampleIndex = 0;
         this.bandGain.fill(1);
-        this.meterMinGain.fill(1);
-        this.meterPeak = 0;
     }
 
     ensureChannels(count) {
@@ -239,6 +334,9 @@ class OttProcessor extends AudioWorkletProcessor {
         this.scratchMid = new Float64Array(count);
         this.scratchHigh = new Float64Array(count);
         this.envelope.fill(0);
+        this.floorEnvelope.fill(0);
+        this.windowMax.forEach((window) => window.reset());
+        this.sampleIndex = 0;
     }
 
     // Only recomputed when the Time knob moves; never per sample.
@@ -250,11 +348,14 @@ class OttProcessor extends AudioWorkletProcessor {
         const attackMs = ATTACK_CENTRE_MS * Math.pow(ATTACK_SPAN, exponent);
         const releaseMs = RELEASE_CENTRE_MS * Math.pow(RELEASE_SPAN, exponent);
 
-        const attackSamples = Math.max(1, (attackMs / 1000) * sampleRate);
         const releaseSamples = Math.max(1, (releaseMs / 1000) * sampleRate);
-
-        this.attackCoefficient = Math.exp(-1 / attackSamples);
         this.releaseCoefficient = Math.exp(-1 / releaseSamples);
+
+        for (let b = 0; b < BAND_COUNT; b++) {
+            const attackSeconds = Math.max(attackMs / 1000, BAND_MIN_ATTACK_SECONDS[b]);
+            const attackSamples = Math.max(1, attackSeconds * sampleRate);
+            this.attackCoefficient[b] = Math.exp(-1 / attackSamples);
+        }
     }
 
     /**
@@ -297,7 +398,8 @@ class OttProcessor extends AudioWorkletProcessor {
     /**
      * How much of the positive gain — upward plus downward makeup — survives at
      * this level. Both are faded out together below UP_FLOOR_TOP_DB, reaching
-     * zero at UP_FLOOR_BOTTOM_DB.
+     * zero at UP_FLOOR_BOTTOM_DB. The level passed in is the slow floor
+     * envelope, not the band detector; see FLOOR_ATTACK_SECONDS.
      *
      * Tapering only the upward stage is not enough: makeup alone is +18 dB at
      * full depth, so a noise floor or an inter-track gap still comes up by that
@@ -311,20 +413,6 @@ class OttProcessor extends AudioWorkletProcessor {
         return (levelDb - UP_FLOOR_BOTTOM_DB) / (UP_FLOOR_TOP_DB - UP_FLOOR_BOTTOM_DB);
     }
 
-    publishMeters() {
-        this.port.postMessage({
-            type: 'meters',
-            reduction: [
-                Math.log(this.meterMinGain[0]) * DB_PER_LOG,
-                Math.log(this.meterMinGain[1]) * DB_PER_LOG,
-                Math.log(this.meterMinGain[2]) * DB_PER_LOG
-            ],
-            peakDb: this.meterPeak > 0 ? Math.log(this.meterPeak) * DB_PER_LOG : -120
-        });
-        this.meterMinGain.fill(1);
-        this.meterPeak = 0;
-    }
-
     process(inputs, outputs, parameters) {
         const input = inputs[0];
         const output = outputs[0];
@@ -336,6 +424,14 @@ class OttProcessor extends AudioWorkletProcessor {
 
         this.ensureChannels(channelCount);
 
+        // A context's sampleRate is fixed for its lifetime, so this is a guard
+        // rather than a code path. Coefficients designed for one rate would put
+        // both crossovers at the wrong frequency at any other.
+        if (sampleRate !== this.designedRate) {
+            this.designCrossover();
+            this.reset();
+        }
+
         if (!input || input.length === 0) {
             for (let c = 0; c < channelCount; c++) output[c].fill(0);
             this.reset();
@@ -345,13 +441,20 @@ class OttProcessor extends AudioWorkletProcessor {
         const depth = parameters.depth[0];
         this.updateTiming(parameters.time[0]);
 
-        const upAmount = [parameters.lowUp[0], parameters.midUp[0], parameters.highUp[0]];
-        const downAmount = [parameters.lowDown[0], parameters.midDown[0], parameters.highDown[0]];
-        const bandGainDb = [
-            parameters.lowGainDb[0],
-            parameters.midGainDb[0],
-            parameters.highGainDb[0]
-        ];
+        const upAmount = this.upAmount;
+        upAmount[0] = parameters.lowUp[0];
+        upAmount[1] = parameters.midUp[0];
+        upAmount[2] = parameters.highUp[0];
+
+        const downAmount = this.downAmount;
+        downAmount[0] = parameters.lowDown[0];
+        downAmount[1] = parameters.midDown[0];
+        downAmount[2] = parameters.highDown[0];
+
+        const bandGainDb = this.bandGainDb;
+        bandGainDb[0] = parameters.lowGainDb[0];
+        bandGainDb[1] = parameters.midGainDb[0];
+        bandGainDb[2] = parameters.highGainDb[0];
 
         // Makeup that puts a full-scale input back at full scale. Because the
         // curve is ours rather than the browser's, this cancels exactly within a
@@ -365,6 +468,11 @@ class OttProcessor extends AudioWorkletProcessor {
         const releaseCoefficient = this.releaseCoefficient;
 
         const envelope = this.envelope;
+        const floorEnvelope = this.floorEnvelope;
+        const floorAttackCoefficient = this.floorAttackCoefficient;
+        const floorReleaseCoefficient = this.floorReleaseCoefficient;
+        const windowMax = this.windowMax;
+        let sampleIndex = this.sampleIndex;
         const bandSample = this.bandSample;
         const bandGain = this.bandGain;
         const scratchLow = this.scratchLow;
@@ -423,9 +531,11 @@ class OttProcessor extends AudioWorkletProcessor {
             bandSample[2] = highPeak;
 
             for (let b = 0; b < BAND_COUNT; b++) {
-                const magnitude = bandSample[b];
+                // The peak over the band's window, not the rectified sample,
+                // so a steady tone reads as a steady level.
+                const magnitude = windowMax[b].push(bandSample[b], sampleIndex);
                 const previous = envelope[b];
-                const coefficient = magnitude > previous ? attackCoefficient : releaseCoefficient;
+                const coefficient = magnitude > previous ? attackCoefficient[b] : releaseCoefficient;
                 let level = coefficient * previous + (1 - coefficient) * magnitude;
                 // The one-pole tail goes subnormal on a fade to silence.
                 if (level < LEVEL_EPSILON) level = 0;
@@ -433,16 +543,22 @@ class OttProcessor extends AudioWorkletProcessor {
 
                 const levelDb = Math.log(level + LEVEL_EPSILON) * DB_PER_LOG;
 
+                const floorPrevious = floorEnvelope[b];
+                const floorCoefficient = magnitude > floorPrevious
+                    ? floorAttackCoefficient
+                    : floorReleaseCoefficient;
+                let floorLevel = floorCoefficient * floorPrevious + (1 - floorCoefficient) * magnitude;
+                if (floorLevel < LEVEL_EPSILON) floorLevel = 0;
+                floorEnvelope[b] = floorLevel;
+                const floorDb = Math.log(floorLevel + LEVEL_EPSILON) * DB_PER_LOG;
+
                 const down = OttProcessor.downwardGainDb(levelDb) * downAmount[b];
                 const up = OttProcessor.upwardGainDb(levelDb) * upAmount[b];
                 const makeup = makeupFullDb * downAmount[b];
-                const positive = (up + makeup) * OttProcessor.floorFactor(levelDb);
+                const positive = (up + makeup) * OttProcessor.floorFactor(floorDb);
 
                 const totalDb = (down + positive) * depth + bandGainDb[b];
-                const gain = dbToGain(totalDb);
-                bandGain[b] = gain;
-
-                if (gain < this.meterMinGain[b]) this.meterMinGain[b] = gain;
+                bandGain[b] = dbToGain(totalDb);
             }
 
             const lowGain = bandGain[0];
@@ -450,21 +566,15 @@ class OttProcessor extends AudioWorkletProcessor {
             const highGain = bandGain[2];
 
             for (let c = 0; c < channelCount; c++) {
-                const y = scratchLow[c] * lowGain
+                output[c][i] = scratchLow[c] * lowGain
                     + scratchMid[c] * midGain
                     + scratchHigh[c] * highGain;
-                output[c][i] = y;
-                const magnitude = y < 0 ? -y : y;
-                if (magnitude > this.meterPeak) this.meterPeak = magnitude;
             }
+
+            sampleIndex++;
         }
 
-        this.meterCountdown -= frames;
-        if (this.meterCountdown <= 0) {
-            this.meterCountdown = this.meterInterval;
-            this.publishMeters();
-        }
-
+        this.sampleIndex = sampleIndex;
         return true;
     }
 }

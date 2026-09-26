@@ -47,19 +47,19 @@ var ThunderFoxSettings = (function() {
 
         ottDepth: 0.35,
         ottTime: 0.5,
-        ottLowUp: 1,
-        ottLowDown: 1,
+        ottLowUp: 0.8,
+        ottLowDown: 0.8,
         ottLowGainDb: 0,
-        ottMidUp: 1,
-        ottMidDown: 1,
+        ottMidUp: 0.8,
+        ottMidDown: 0.8,
         ottMidGainDb: 0,
-        ottHighUp: 1,
-        ottHighDown: 1,
+        ottHighUp: 0.8,
+        ottHighDown: 0.8,
         ottHighGainDb: 0,
 
         limiterAttackMs: 2.5,
         limiterReleaseMs: 120,
-        limiterHoldMs: 2,
+        limiterHoldMs: 20,
         limiterCeilingDb: -0.3,
         limiterIsp: true
     };
@@ -83,7 +83,7 @@ var ThunderFoxSettings = (function() {
         ottHighGainDb: { min: -20, max: 20, unit: 'db' },
 
         limiterAttackMs: { min: 0.2, max: 5, unit: 'ms' },
-        limiterReleaseMs: { min: 10, max: 500, unit: 'ms' },
+        limiterReleaseMs: { min: 10, max: 1000, unit: 'ms' },
         limiterHoldMs: { min: 0, max: 50, unit: 'ms' },
         limiterCeilingDb: { min: -3, max: 0, unit: 'db' }
     };
@@ -92,12 +92,59 @@ var ThunderFoxSettings = (function() {
     // DEFAULTS while the user's own values stay in storage.
     const ADVANCED_KEYS = Object.keys(LIMITS);
 
+    // Bumped whenever a default changes in a way stored values should follow.
+    // Stored values silently override DEFAULTS, so without this a changed
+    // default only ever reaches fresh installs. Storage that predates the key
+    // is version 0.
+    const SETTINGS_VERSION = 2;
+
     function clamp(value, min, max) {
         return Math.max(min, Math.min(max, value));
     }
 
     function isFiniteNumber(value) {
         return typeof value === 'number' && isFinite(value);
+    }
+
+    // MIGRATIONS[n] upgrades stored values from version n to n + 1. Each takes
+    // the stored object as it stands and returns only the keys it changes. A
+    // migration moves a value only when it still equals the old default: a
+    // value the user set deliberately is theirs, even if it happens to be the
+    // old default, and there is no way to tell the two apart, so equality is
+    // the honest cut.
+    const MIGRATIONS = [
+        // 0 -> 1: per-band Up and Down defaults moved from 100% to 80%.
+        (stored) => {
+            const patch = {};
+            ['ottLowUp', 'ottLowDown', 'ottMidUp', 'ottMidDown', 'ottHighUp', 'ottHighDown']
+                .forEach((key) => {
+                    if (stored[key] === 1) patch[key] = DEFAULTS[key];
+                });
+            return patch;
+        },
+        // 1 -> 2: limiter hold default moved from 2 ms to 20 ms, long enough
+        // to cover one half-cycle of bass so the gain no longer moves within a
+        // cycle under sustained limiting.
+        (stored) => {
+            const patch = {};
+            if (stored.limiterHoldMs === 2) patch.limiterHoldMs = DEFAULTS.limiterHoldMs;
+            return patch;
+        }
+    ];
+
+    // The patch that brings `stored` up to SETTINGS_VERSION, or an empty object
+    // if it is current already. Storage from a newer version is left alone.
+    function migrateStored(stored) {
+        const source = stored || {};
+        const from = isFiniteNumber(source.settingsVersion) ? source.settingsVersion : 0;
+        if (from >= SETTINGS_VERSION) return {};
+
+        const patch = {};
+        for (let version = from; version < SETTINGS_VERSION; version++) {
+            Object.assign(patch, MIGRATIONS[version](Object.assign({}, source, patch)));
+        }
+        patch.settingsVersion = SETTINGS_VERSION;
+        return patch;
     }
 
     function sanitizeAdvanced(source) {
@@ -159,7 +206,9 @@ var ThunderFoxSettings = (function() {
         DEFAULTS,
         LIMITS,
         ADVANCED_KEYS,
+        SETTINGS_VERSION,
         clamp,
+        migrateStored,
         sanitizeAdvanced,
         sanitizeEqGains,
         loudnessAmount,
