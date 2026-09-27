@@ -603,8 +603,15 @@ class OttProcessor extends AudioWorkletProcessor {
         // state: dragging the slider steps the split once per quantum, and a
         // TDF2 section rides a coefficient step far more gracefully than the
         // click a state reset would put out.
-        const lowCross = parameters.lowCrossHz[0];
-        const highCross = parameters.highCrossHz[0];
+        let lowCross = parameters.lowCrossHz[0];
+        let highCross = parameters.highCrossHz[0];
+        // The UI and the sanitiser both keep low <= high; this is the last
+        // line of defence for a host that does not.
+        if (lowCross > highCross) {
+            const swapped = lowCross;
+            lowCross = highCross;
+            highCross = swapped;
+        }
         if (lowCross !== this.lowCrossoverHz || highCross !== this.highCrossoverHz) {
             this.lowCrossoverHz = lowCross;
             this.highCrossoverHz = highCross;

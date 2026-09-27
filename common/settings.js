@@ -209,6 +209,14 @@ var ThunderFoxSettings = (function() {
             const value = source && isFiniteNumber(source[key]) ? source[key] : DEFAULTS[key];
             result[key] = clamp(value, limits.min, limits.max);
         });
+        // Crossed crossovers would invert the mid band. Storage written by
+        // older versions allowed it, so swap rather than clamp: both chosen
+        // frequencies survive, in the only order the split makes sense in.
+        if (result.ottLowCrossHz > result.ottHighCrossHz) {
+            const swapped = result.ottLowCrossHz;
+            result.ottLowCrossHz = result.ottHighCrossHz;
+            result.ottHighCrossHz = swapped;
+        }
         result.limiterIsp = source && typeof source.limiterIsp === 'boolean'
             ? source.limiterIsp
             : DEFAULTS.limiterIsp;

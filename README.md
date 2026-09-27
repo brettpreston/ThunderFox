@@ -107,7 +107,8 @@ The Advanced section is off by default. While it is off, the built-in defaults a
 | Mix | 0-100% | 100% | Per-band dry/wet blend |
 | Upward / Downward | 0-200% | 100% | Global multiplier on each compression direction |
 | Attack / Release | 0-100% | 50% | Envelope times, all bands (exponential, ±55x around the base) |
-| Low / Mid, Mid / High | 20 Hz to 18 kHz | 120 Hz / 5 kHz | Crossover frequencies of the band split |
+| Crossover | 20 Hz to 18 kHz | 120 Hz / 5 kHz | Both band-split points, two thumbs on one slider |
+| Lin. phase | on/off | off | Linear-phase FIR band split (adds latency and CPU) |
 | Up / Down | 0-100% | OTT preset | Per-band ratio of each compression direction |
 | Gain | ±30 dB | +16.3 / +11.7 / +16.3 dB | Per-band output gain (OTT's makeup), scaled by Depth |
 | Attack (limiter) | 0.2-5 ms | 2.5 ms | Limiter gain-envelope smoothing |
@@ -128,7 +129,7 @@ The Advanced section is off by default. While it is off, the built-in defaults a
 
 **In gain** sits before the crossover, so it drives the compressors harder rather than just making things louder.
 
-**Low / Mid and Mid / High** move the two crossover points. The split stays sum-flat wherever they sit, because the three bands always reconstruct to the same allpass pair.
+**Crossover** is one slider with two thumbs: the left thumb is the low/mid split, the right the mid/high split. The split stays sum-flat wherever they sit, because the three bands always reconstruct to the same allpass pair. The thumbs cannot cross — each stops one step (about 0.1 octave) short of the other, so the mid band never inverts into an overlap remnant — and crossed values from older versions are swapped into order when read.
 
 The time and frequency sliders are logarithmic, because a linear control across three orders of magnitude would bunch every useful value into the first few pixels. Decibels and percentages are linear.
 

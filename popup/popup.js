@@ -37,8 +37,7 @@ const ADVANCED_LAYOUT = [
     },
     {
         group: 'Crossover', rows: [
-            { key: 'ottLowCrossHz', label: 'Low / Mid' },
-            { key: 'ottHighCrossHz', label: 'Mid / High' },
+            { type: 'dualRange', lowKey: 'ottLowCrossHz', highKey: 'ottHighCrossHz', label: 'Points' },
             { key: 'ottLinearPhase', label: 'Lin. phase', type: 'checkbox' }
         ]
     },
@@ -259,6 +258,93 @@ function renderEq() {
     requestAnimationFrame(drawEQCurve);
 }
 
+/**
+ * Two thumbs on one rail: two native range inputs stacked on top of each
+ * other, their tracks transparent and only their thumbs taking pointer
+ * events, over a drawn rail with a fill between the thumbs. Native inputs
+ * keep keyboard support (arrows, Home/End) and the focus ring for free.
+ * The thumbs cannot cross: each clamps at one slider step (about 0.1 octave
+ * on this log scale) short of the other, which keeps the mid band nonzero
+ * and the two thumbs separable by mouse.
+ */
+function buildDualRange(row) {
+    // Both keys share the same 20 Hz - 18 kHz log range.
+    const range = S.LIMITS[row.lowKey];
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'row adv-row';
+
+    const label = document.createElement('label');
+    label.textContent = row.label;
+    label.htmlFor = `adv-${row.lowKey}`;
+
+    const rail = document.createElement('div');
+    rail.className = 'dual-range';
+
+    const track = document.createElement('div');
+    track.className = 'dual-range-rail';
+    const fill = document.createElement('div');
+    fill.className = 'dual-range-fill';
+    track.appendChild(fill);
+
+    const lowInput = document.createElement('input');
+    const highInput = document.createElement('input');
+    [[lowInput, row.lowKey, 'Low/mid crossover frequency'],
+        [highInput, row.highKey, 'Mid/high crossover frequency']].forEach(([input, key, aria]) => {
+        input.type = 'range';
+        input.id = `adv-${key}`;
+        input.min = '0';
+        input.max = '100';
+        input.step = '1';
+        input.setAttribute('aria-label', aria);
+    });
+
+    rail.append(track, lowInput, highInput);
+    wrapper.append(label, rail);
+    advancedBody.appendChild(wrapper);
+
+    // Two values do not fit the 50px readout column, so the pair reads out
+    // on its own line under the rail.
+    const readout = document.createElement('div');
+    readout.className = 'dual-range-readout';
+    readout.id = `adv-${row.lowKey}-value`;
+    advancedBody.appendChild(readout);
+
+    const dual = {
+        render() {
+            const lowValue = settings[row.lowKey];
+            const highValue = settings[row.highKey];
+            lowInput.value = String(valueToSlider(lowValue, range));
+            highInput.value = String(valueToSlider(highValue, range));
+            const lowText = formatValue(lowValue, range);
+            const highText = formatValue(highValue, range);
+            readout.textContent = `${lowText} – ${highText}`;
+            lowInput.setAttribute('aria-valuetext', lowText);
+            highInput.setAttribute('aria-valuetext', highText);
+            fill.style.left = `${Number(lowInput.value)}%`;
+            fill.style.right = `${100 - Number(highInput.value)}%`;
+        }
+    };
+
+    lowInput.addEventListener('input', () => {
+        if (Number(lowInput.value) > Number(highInput.value) - 1) {
+            lowInput.value = String(Number(highInput.value) - 1);
+        }
+        commit({ [row.lowKey]: sliderToValue(lowInput.value, range) });
+        dual.render();
+    });
+    highInput.addEventListener('input', () => {
+        if (Number(highInput.value) < Number(lowInput.value) + 1) {
+            highInput.value = String(Number(lowInput.value) + 1);
+        }
+        commit({ [row.highKey]: sliderToValue(highInput.value, range) });
+        dual.render();
+    });
+
+    advancedControls[row.lowKey] = { dual };
+    advancedControls[row.highKey] = { dual };
+}
+
 function buildAdvanced() {
     ADVANCED_LAYOUT.forEach((section) => {
         const heading = document.createElement('div');
@@ -267,6 +353,10 @@ function buildAdvanced() {
         advancedBody.appendChild(heading);
 
         section.rows.forEach((row) => {
+            if (row.type === 'dualRange') {
+                buildDualRange(row);
+                return;
+            }
             if (row.type === 'checkbox') {
                 const checkboxRow = document.createElement('div');
                 checkboxRow.className = 'row adv-row';
@@ -348,6 +438,10 @@ function renderAdvancedRow(key, value) {
 function renderAdvanced() {
     Object.keys(advancedControls).forEach((key) => {
         const control = advancedControls[key];
+        if (control.dual) {
+            control.dual.render();
+            return;
+        }
         if (control.input) {
             control.input.checked = !!settings[key];
             return;

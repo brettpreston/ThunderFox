@@ -487,5 +487,33 @@ console.log('\n== OTT: linear phase ==');
     check('-90 dBFS input is not lifted', lift < 1, `${fmt(lift, 2)} dB`);
 }
 
+/* ------------------------------------------------------------------ settings */
+
+console.log('\n== Settings ==');
+
+{
+    // common/settings.js is browser-free, so it runs as-is in a bare context.
+    const fs = require('fs');
+    const path = require('path');
+    const vm = require('vm');
+    const source = fs.readFileSync(path.resolve(__dirname, '..', 'common', 'settings.js'), 'utf8');
+    const settings = vm.runInNewContext(`${source}; ThunderFoxSettings`, {});
+
+    const swapped = settings.sanitizeAdvanced({ ottLowCrossHz: 8000, ottHighCrossHz: 300 });
+    check('sanitizeAdvanced swaps crossed crossovers',
+        swapped.ottLowCrossHz === 300 && swapped.ottHighCrossHz === 8000,
+        `${swapped.ottLowCrossHz} / ${swapped.ottHighCrossHz} Hz`);
+
+    const nudged = settings.migrateStored({ settingsVersion: 3, ottDepth: 1, ottHighCrossHz: 2500 });
+    check('migration 3 -> 4 nudges values still at the old defaults',
+        nudged.ottDepth === 0.5 && nudged.ottHighCrossHz === 5000 && nudged.settingsVersion === 4,
+        JSON.stringify(nudged));
+
+    const kept = settings.migrateStored({ settingsVersion: 3, ottDepth: 0.9, ottHighCrossHz: 2600 });
+    check('migration 3 -> 4 leaves deliberate values alone',
+        kept.ottDepth === undefined && kept.ottHighCrossHz === undefined && kept.settingsVersion === 4,
+        JSON.stringify(kept));
+}
+
 console.log(`\n${passes} passed, ${failures} failed`);
 process.exit(failures > 0 ? 1 : 0);
