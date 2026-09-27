@@ -308,6 +308,81 @@ console.log('\n== OTT ==');
     });
 }
 
+/* ------------------------------------------------------ OTT: HF alias spurs */
+
+console.log('\n== OTT: HF alias spurs ==');
+
+const ott441 = loadProcessor('content/ott-processor.js', 44100);
+
+{
+    // The compressor gain is recomputed every sample from an envelope that
+    // ripples at twice the signal frequency. Applying that gain raw
+    // amplitude-modulates the band, and above about 6 kHz the AM products
+    // fold back below Nyquist as discrete inharmonic tones — the "ringing"
+    // audible on bright content. 48 kHz hides much of it, because the folds
+    // of fundamentals that divide the rate land back on the harmonic grid;
+    // 44.1 kHz is the rate that shows the problem. The bound is on the worst
+    // discrete off-harmonic spur (see worstSpurDb for why not an integral).
+    [ott, ott441].forEach((instance) => {
+        const rate = instance.sampleRate;
+        [6000, 8000, 10000, 12000].forEach((f0) => {
+            [['sine', S.tone], ['square', S.squareBandlimited]].forEach(([kind, generate]) => {
+                const input = generate(f0, 1.5, rate, S.dbToGain(-12));
+                const out = instance.run(instance.create(), S.stereo(input), { depth: 1 })[0];
+                const spur = S.worstSpurDb(out, f0, rate, Math.round(0.4 * rate), Math.round(1.4 * rate));
+                const inharmonic = S.inharmonicRatioDb(out, f0, rate, Math.round(0.4 * rate), Math.round(1.4 * rate));
+                check(`${kind} ${f0} Hz at ${rate} Hz: worst alias spur under -78 dBc`,
+                    spur.db <= -78 && !S.hasNonFinite(out),
+                    `${fmt(spur.db, 1)} dBc at ${Math.round(spur.hz)} Hz, inharmonic total ${fmt(inharmonic, 1)} dB`);
+            });
+        });
+    });
+}
+
+{
+    // A naive square already contains folded harmonics of its own. The
+    // processor must not add substantially to them, and must stay finite.
+    const rate = 44100;
+    [8000, 10000].forEach((f0) => {
+        const input = S.squareNaive(f0, 1.5, rate, S.dbToGain(-12));
+        const out = ott441.run(ott441.create(), S.stereo(input), { depth: 1 })[0];
+        const inSpur = S.worstSpurDb(input, f0, rate, Math.round(0.4 * rate), Math.round(1.4 * rate));
+        const outSpur = S.worstSpurDb(out, f0, rate, Math.round(0.4 * rate), Math.round(1.4 * rate));
+        check(`naive square ${f0} Hz: spurs stay near the input's own`,
+            outSpur.db <= inSpur.db + 6 && !S.hasNonFinite(out),
+            `in ${fmt(inSpur.db, 1)} dBc -> out ${fmt(outSpur.db, 1)} dBc`);
+    });
+}
+
+{
+    // Comb filtering would notch the magnitude response. At depth 0 the band
+    // sum is an allpass pair, so the response must be flat outright; at depth
+    // 1 compression tilts the spectrum, but smoothly — a tone sitting well
+    // below the local trend is what a band misalignment would leave.
+    // Integer frequencies sit exactly on the bins of the one-second Goertzel
+    // window, so no leakage: the allpass rotates each tone's phase, and
+    // off-bin leakage would interfere differently in input and output.
+    const frequencies = [];
+    for (let i = 0; i < 40; i++) frequencies.push(Math.round(40 * Math.pow(18000 / 40, i / 39)));
+    const input = S.multitone(frequencies, 2, RATE, S.dbToGain(-30));
+
+    [{ label: 'stock crossovers', params: { depth: 0 } },
+     { label: 'crossovers 250/6000', params: { depth: 0, lowCrossHz: 250, highCrossHz: 6000 } }]
+        .forEach(({ label, params }) => {
+            const out = ott.run(ott.create(), S.stereo(input), params)[0];
+            const gains = S.toneGainsDb(input, out, frequencies, RATE, RATE, 2 * RATE);
+            const spread = Math.max(...gains) - Math.min(...gains);
+            check(`multitone at depth 0 (${label}): response flat within 0.3 dB`,
+                spread < 0.3 && !S.hasNonFinite(out), `spread ${fmt(spread, 3)} dB`);
+        });
+
+    const squashed = ott.run(ott.create(), S.stereo(input), { depth: 1 })[0];
+    const squashedGains = S.toneGainsDb(input, squashed, frequencies, RATE, RATE, 2 * RATE);
+    const notch = S.notchDepthDb(squashedGains);
+    check('multitone at depth 1: no comb notch against the local trend', notch < 3 && !S.hasNonFinite(squashed),
+        `worst notch ${fmt(notch, 2)} dB`);
+}
+
 {
     // Silence must stay silent: the upward stage and the positive band gain
     // fade out below the floor rather than lifting the noise floor by the

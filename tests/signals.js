@@ -76,6 +76,49 @@ function wobblingTone(frequency, seconds, rate, centreDb, swingDb, wobbleHz) {
     return out;
 }
 
+// Naive square/pulse wave: instantaneous edges, so the input itself already
+// contains folded harmonics. A stress signal, not a clean reference.
+function squareNaive(frequency, seconds, rate, amplitude, duty) {
+    const d = duty === undefined ? 0.5 : duty;
+    const out = new Float32Array(Math.round(seconds * rate));
+    for (let i = 0; i < out.length; i++) {
+        out[i] = ((i * frequency) / rate) % 1 < d ? amplitude : -amplitude;
+    }
+    return out;
+}
+
+// Band-limited pulse wave: the Fourier series of a rectangular wave at the
+// given duty cycle, truncated below 0.45 * rate. Every harmonic present is
+// exact, so anything off the harmonic grid in the output was made by the
+// processor. Above rate/6 only the fundamental fits and this degenerates to
+// a sine, which is fine — the artifact under test is processor-generated
+// either way.
+function squareBandlimited(frequency, seconds, rate, amplitude, duty) {
+    const d = duty === undefined ? 0.5 : duty;
+    const out = new Float32Array(Math.round(seconds * rate));
+    for (let h = 1; h * frequency < 0.45 * rate; h++) {
+        const coefficient = ((4 * amplitude) / (Math.PI * h)) * Math.sin(Math.PI * h * d);
+        if (coefficient === 0) continue;
+        const step = (2 * Math.PI * h * frequency) / rate;
+        for (let i = 0; i < out.length; i++) out[i] += coefficient * Math.sin(step * i);
+    }
+    return out;
+}
+
+// A sum of sines at the given frequencies, Schroeder-phased so the crest
+// factor stays bounded rather than piling every tone onto one peak.
+function multitone(frequencies, seconds, rate, amplitudePerTone) {
+    const out = new Float32Array(Math.round(seconds * rate));
+    frequencies.forEach((frequency, k) => {
+        const phase = (Math.PI * k * k) / frequencies.length;
+        const step = (2 * Math.PI * frequency) / rate;
+        for (let i = 0; i < out.length; i++) {
+            out[i] += amplitudePerTone * Math.sin(step * i + phase);
+        }
+    });
+    return out;
+}
+
 function concat(parts) {
     const length = parts.reduce((sum, part) => sum + part.length, 0);
     const out = new Float32Array(length);
@@ -141,6 +184,75 @@ function thdDb(signal, fundamental, rate, from, to, harmonics) {
         sum += power(signal, fundamental * h, rate, from, to);
     }
     return base > 0 ? 10 * Math.log10(sum / base) : -Infinity;
+}
+
+/**
+ * The worst discrete off-harmonic tone, in dB relative to the fundamental,
+ * and where it sits: a Goertzel scan from 300 Hz to just below Nyquist,
+ * skipping a guard band around every harmonic of the fundamental. The metric
+ * is a max with a guard band, not an integral, and that matters: the upward
+ * stage legitimately amplitude-modulates the band it rides, which puts a
+ * broad, masked skirt around the carrier and its harmonics. The audible
+ * defect is different — a discrete aliased tone far from any harmonic — and
+ * only a guarded max sees it instead of the skirt.
+ */
+function worstSpurDb(signal, fundamental, rate, from, to, guardHz, stepHz) {
+    const guard = guardHz === undefined ? 400 : guardHz;
+    const step = stepHz === undefined ? 50 : stepHz;
+    const base = power(signal, fundamental, rate, from, to);
+    let worst = 0;
+    let worstHz = NaN;
+    for (let f = 300; f < rate / 2 - 100; f += step) {
+        const nearestHarmonic = Math.round(f / fundamental) * fundamental;
+        if (Math.abs(f - nearestHarmonic) < guard) continue;
+        const p = power(signal, f, rate, from, to);
+        if (p > worst) { worst = p; worstHz = f; }
+    }
+    return {
+        db: base > 0 && worst > 0 ? 10 * Math.log10(worst / base) : -Infinity,
+        hz: worstHz
+    };
+}
+
+// Integrated off-harmonic energy relative to the fundamental: total power
+// minus the harmonic bins. Dominated by the benign AM skirt around the
+// carrier, so it is for reporting only — worstSpurDb is the metric that
+// matches what is heard.
+function inharmonicRatioDb(signal, fundamental, rate, from, to) {
+    const end = to === undefined ? signal.length : to;
+    const start = from || 0;
+    const base = power(signal, fundamental, rate, start, end);
+    let total = 0;
+    for (let i = start; i < end; i++) total += signal[i] * signal[i];
+    total /= Math.max(1, end - start);
+    // Goertzel power is the tone's mean-square amplitude contribution.
+    let harmonic = 0;
+    for (let h = 1; h * fundamental < rate / 2; h++) {
+        harmonic += power(signal, h * fundamental, rate, start, end);
+    }
+    const residual = Math.max(0, total - harmonic);
+    return base > 0 && residual > 0 ? 10 * Math.log10(residual / base) : -Infinity;
+}
+
+// Per-tone output/input power ratio in dB: the magnitude response through a
+// processor, measured with a multitone of the same frequencies.
+function toneGainsDb(input, output, frequencies, rate, from, to) {
+    return frequencies.map((frequency) => {
+        const pIn = power(input, frequency, rate, from, to);
+        const pOut = power(output, frequency, rate, from, to);
+        return pIn > 0 ? 10 * Math.log10(pOut / pIn) : NaN;
+    });
+}
+
+// A comb notch reads as one tone sitting well below the average of its two
+// neighbours; a smooth tilt or shelf reads near zero.
+function notchDepthDb(gainsDb) {
+    let worst = 0;
+    for (let i = 1; i < gainsDb.length - 1; i++) {
+        const dip = (gainsDb[i - 1] + gainsDb[i + 1]) / 2 - gainsDb[i];
+        if (dip > worst) worst = dip;
+    }
+    return worst;
 }
 
 /**
@@ -229,6 +341,9 @@ module.exports = {
     steppedTone,
     kickBass,
     wobblingTone,
+    squareNaive,
+    squareBandlimited,
+    multitone,
     concat,
     stereo,
     peak,
@@ -236,6 +351,10 @@ module.exports = {
     hasNonFinite,
     power,
     thdDb,
+    worstSpurDb,
+    inharmonicRatioDb,
+    toneGainsDb,
+    notchDepthDb,
     gainTrack,
     timeConstant,
     gainRoughness,
