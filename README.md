@@ -7,7 +7,8 @@ The processing has three stages: an OTT-style multiband compressor, a graphic eq
 ## Features
 
 - Three-band upward **and** downward ("OTT-style") compression in an AudioWorklet, split by a 4th-order Linkwitz-Riley crossover at 120 Hz and 5 kHz (adjustable under Advanced).
-- OTT's controls: **Depth**, **Mix**, **Attack**, **Release**, global **Upward**/**Downward**, plus per-band Up, Down and Gain, with OTT's stock preset as the defaults.
+- OTT's controls: **Depth**, **Mix**, **Attack**, **Release**, global **Upward**/**Downward**, plus per-band Up, Down and Gain, with the stock preset at half depth as the defaults.
+- An optional **linear-phase** band split: complementary FIR pairs that sum to a pure delay, for zero phase rotation at the crossovers, at the cost of about 11 ms of latency and more CPU.
 - A true look-ahead brickwall limiter in an AudioWorklet: no clipping, no saturation, no waveshaping. Material below the ceiling passes through untouched.
 - **Inter-sample peak (true peak) detection** in the limiter, so the output does not overshoot 0 dBFS once a downstream resampler or codec reconstructs it.
 - A single Loudness macro that drives multiband depth and limiter drive together.
@@ -22,7 +23,7 @@ The processing has three stages: an OTT-style multiband compressor, a graphic eq
 media element(s)
   -> shared input
   -> pre-boost (0 to +24 dB, user)
-  -> OTT worklet: LR4 crossover -> per band { downward + upward comp, makeup, band gain }
+  -> OTT worklet: LR4 (or linear-phase FIR) crossover -> per band { downward + upward comp, makeup, band gain }
   -> highpass (optional)
   -> 8-band EQ (optional)
   -> drive (Loudness macro, 0 to +24 dB)
@@ -52,7 +53,7 @@ because `(s^2 + 1)^2 - 2 s^2 = s^4 + 1`. Splitting twice therefore leaves the lo
 
 ### The compressor core
 
- Each band and channel runs two asymmetric one-pole envelopes on the *squared* sample — one for the downward stage, one for the upward — with per-band base times (low 2.8/40 ms, mid 1.4/28 ms, high 0.7/15 ms attack/release) that the Attack and Release knobs scale exponentially. The downward envelope is clamped to at least the upper threshold and the upward envelope to at most the lower threshold, so each stage is exactly unity until its threshold is crossed. The gain is a power law of the envelope's distance from threshold, and the combined upward gain is clamped at +30 dB. Channels are **not** linked — left and right compress independently, as in OTT.
+ Each band and channel runs two asymmetric one-pole envelopes on the *squared* sample — one for the downward stage, one for the upward — with per-band base times (low 2.8/40 ms, mid 1.4/28 ms, high 0.7/15 ms attack/release) that the Attack and Release knobs scale exponentially. The downward envelope is clamped to at least the upper threshold and the upward envelope to at most the lower threshold, so each stage is exactly unity until its threshold is crossed. The gain is a power law of the envelope's distance from threshold, and the combined upward gain is clamped at +30 dB. Channels are **not** linked — left and right compress independently. The applied gain runs through a 0.2 ms one-pole smoother, decoupled from the detector: without it the envelope's ripple at twice the signal frequency amplitude-modulates the band, and above about 6 kHz the AM products fold back below Nyquist as discrete inharmonic tones (measured at −65 dBc at 44.1 kHz before the smoother, −82 dBc or better after).
 
 Two web-specific behaviours: the band gains (the stock +16.3/+11.7/+16.3 dB makeup) are scaled by Depth, so Depth 0 is a true bypass and the Loudness macro's low end stays gentle; and the upward stage plus the positive band gain fade out between −60 and −80 dBFS on a slow envelope of their own (20 ms up, 400 ms down). Without that fade, a noise floor or the gap between tracks comes up by 30 dB plus makeup.
 
@@ -131,6 +132,8 @@ The Advanced section is off by default. While it is off, the built-in defaults a
 
 **Crossover** is one slider with two thumbs: the left thumb is the low/mid split, the right the mid/high split. The split stays sum-flat wherever they sit, because the three bands always reconstruct to the same allpass pair. The thumbs cannot cross — each stops one step (about 0.1 octave) short of the other, so the mid band never inverts into an overlap remnant — and crossed values from older versions are swapped into order when read.
 
+**Lin. phase** swaps the IIR crossover for complementary FIR pairs inside the worklet. The lowpass is a windowed sinc and the highpass is the delayed input minus it, so the three bands sum to a *pure delay*: exactly flat and exactly linear phase, with no phase rotation at the crossover points and steeper band edges. The costs are latency (542 samples ≈ 11.3 ms at the stock crossovers, so ≈ 16.5 ms with the limiter — still inside lip-sync tolerance) and convolution CPU. Tap counts follow the crossover frequencies (63 to 1023), so a low crossover below about 260 Hz gets a transition band honestly looser (±0.65 octave) than the IIR tree's, and dragging a crossover in this mode can click when the tap count steps. Off by default.
+
 The time and frequency sliders are logarithmic, because a linear control across three orders of magnitude would bunch every useful value into the first few pixels. Decibels and percentages are linear.
 
 ## Site exemptions
@@ -154,11 +157,11 @@ The time and frequency sliders are logarithmic, because a linear control across 
 - **Some videos on a site are processed and others are not.** The ones left alone are usually served cross-origin from a host that sends no CORS headers; the console says so per element.
 - **Very quiet output.** Raise "Loudness" first, then "In gain" under Advanced.
 - **Distortion.** The limiter applies a gain envelope and nothing else. A little grit on sustained bass is the multiband envelope itself (its ripple is part of the sound; raise "Release" to tame it); anything worse is upstream — back off In gain and Loudness first. The applied compressor gain is smoothed over 0.2 ms, which keeps the envelope's supersonic ripple from folding back as inharmonic alias tones on bright content.
-- **Audio and video drift out of sync.** The chain adds about 5.1 ms: the limiter's look-ahead plus 6 samples for the true-peak detector. The multiband stage is IIR and adds none. That is well inside normal lip-sync tolerance.
+- **Audio and video drift out of sync.** The chain adds about 5.1 ms: the limiter's look-ahead plus 6 samples for the true-peak detector. The multiband stage is IIR and adds none — unless "Lin. phase" is on, which adds its FIR delay (≈ 11.3 ms at the stock crossovers, ≈ 16.5 ms total). Both are inside normal lip-sync tolerance.
 
 ## Development notes
 
-- **Offline DSP tests: `npm test`** (or `node tests/run.js`, no dependencies). `tests/harness.js` evaluates the two worklet files in a `vm` context with `AudioWorkletProcessor`, `registerProcessor` and `sampleRate` shimmed, so the file the extension ships is what runs. `tests/signals.js` has tone, stepped-tone and impulse generators plus peak, RMS, Goertzel THD and gain-trajectory measurements. The tests check the limiter's ceiling on tones and impulses, that measured latency equals the reported latency, that each Release setting recovers in about that time, distortion on driven bass, OTT flatness at depth 0, the OTT transfer curve (quiet up, loud down, range compressed), that the Attack and Release knobs move the envelope times, and steady-tone distortion per band. Measured values are printed next to each result so tuning changes can be compared.
+- **Offline DSP tests: `npm test`** (or `node tests/run.js`, no dependencies). `tests/harness.js` evaluates the two worklet files in a `vm` context with `AudioWorkletProcessor`, `registerProcessor` and `sampleRate` shimmed, so the file the extension ships is what runs. `tests/signals.js` has tone, stepped-tone, impulse, pulse-wave (naive and band-limited) and Schroeder-phased multitone generators, plus peak, RMS, Goertzel THD, gain-trajectory, worst-spur, magnitude-response and notch-depth measurements. The tests check the limiter's ceiling on tones and impulses, that measured latency equals the reported latency, that each Release setting recovers in about that time, distortion on driven bass, OTT flatness at depth 0, the OTT transfer curve (quiet up, loud down, range compressed), that the Attack and Release knobs move the envelope times, and steady-tone distortion per band. High-frequency alias spurs are bounded at −78 dBc at both 48 and 44.1 kHz — the spur metric is a guarded max (skipping a band around every harmonic) rather than an integral, because the upward stage legitimately puts a broad masked AM skirt around the carrier while the audible defect is a discrete folded tone. A multitone response check proves the crossover neither tilts at depth 0 nor combs at depth 1, the linear-phase mode is verified to sum to a pure delay, and the settings migration and crossover ordering have tests of their own. Measured values are printed next to each result so tuning changes can be compared.
 
 - **Both worklets or neither.** If either AudioWorklet module fails to load, `buildAudioContext()` closes the context and throws, and the page plays natively. A partially built chain — drive with no limiter behind it — is worse than not processing at all.
 - **The limiter has to be an AudioWorklet.** Look-ahead means reading samples before they play, which no built-in node can do. `DynamicsCompressorNode` has no look-ahead so it always overshoots, and a `WaveShaper` bounds the output only by reshaping the waveform, which is distortion by definition.
