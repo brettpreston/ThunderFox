@@ -6,7 +6,7 @@ The processing has three stages: an OTT-style multiband compressor, a graphic eq
 
 ## Features
 
-- Three-band upward **and** downward ("OTT-style") compression in an AudioWorklet, split by a 4th-order Linkwitz-Riley crossover at 120 Hz and 2.5 kHz (adjustable under Advanced).
+- Three-band upward **and** downward ("OTT-style") compression in an AudioWorklet, split by a 4th-order Linkwitz-Riley crossover at 120 Hz and 5 kHz (adjustable under Advanced).
 - OTT's controls: **Depth**, **Mix**, **Attack**, **Release**, global **Upward**/**Downward**, plus per-band Up, Down and Gain, with OTT's stock preset as the defaults.
 - A true look-ahead brickwall limiter in an AudioWorklet: no clipping, no saturation, no waveshaping. Material below the ceiling passes through untouched.
 - **Inter-sample peak (true peak) detection** in the limiter, so the output does not overshoot 0 dBFS once a downstream resampler or codec reconstructs it.
@@ -103,11 +103,11 @@ The Advanced section is off by default. While it is off, the built-in defaults a
 | Control | Range | Default | Applies to |
 | --- | --- | --- | --- |
 | In gain | 0 to +24 dB | 0 dB | Input gain ahead of the crossover |
-| Depth | 0-100% | 100% | Scales the compression ratios and band gains, all bands |
+| Depth | 0-100% | 50% | Scales the compression ratios and band gains, all bands |
 | Mix | 0-100% | 100% | Per-band dry/wet blend |
 | Upward / Downward | 0-200% | 100% | Global multiplier on each compression direction |
 | Attack / Release | 0-100% | 50% | Envelope times, all bands (exponential, ±55x around the base) |
-| Low / Mid, Mid / High | 20 Hz to 18 kHz | 120 Hz / 2.5 kHz | Crossover frequencies of the band split |
+| Low / Mid, Mid / High | 20 Hz to 18 kHz | 120 Hz / 5 kHz | Crossover frequencies of the band split |
 | Up / Down | 0-100% | OTT preset | Per-band ratio of each compression direction |
 | Gain | ±30 dB | +16.3 / +11.7 / +16.3 dB | Per-band output gain (OTT's makeup), scaled by Depth |
 | Attack (limiter) | 0.2-5 ms | 2.5 ms | Limiter gain-envelope smoothing |

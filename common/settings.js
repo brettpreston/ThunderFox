@@ -45,19 +45,19 @@ var ThunderFoxSettings = (function() {
 
         preBoostDb: 0,
 
-        // The OTT-style stock preset: full depth and mix, both directions
+        // The OTT-style stock preset at half depth: full mix, both directions
         // at 1x, knobs at their base times, band ratios 0.8 up and
         // 0.9/0.857/1.0 down, band gains +16.3/+11.7/+16.3 dB. The band gain
         // is scaled by Depth inside the worklet, so the Loudness macro's low
         // end stays gentle.
-        ottDepth: 1,
+        ottDepth: 0.5,
         ottMix: 1,
         ottAttack: 0.5,
         ottRelease: 0.5,
         ottUpward: 1,
         ottDownward: 1,
         ottLowCrossHz: 120,
-        ottHighCrossHz: 2500,
+        ottHighCrossHz: 5000,
         ottLowUp: 0.8,
         ottLowDown: 0.9,
         ottLowGainDb: 16.3,
@@ -114,7 +114,7 @@ var ThunderFoxSettings = (function() {
     // Stored values silently override DEFAULTS, so without this a changed
     // default only ever reaches fresh installs. Storage that predates the key
     // is version 0.
-    const SETTINGS_VERSION = 3;
+    const SETTINGS_VERSION = 4;
 
     function clamp(value, min, max) {
         return Math.max(min, Math.min(max, value));
@@ -167,6 +167,17 @@ var ThunderFoxSettings = (function() {
                 if (stored[key] === 0) patch[key] = DEFAULTS[key];
             });
             if (stored.limiterReleaseMs === 120) patch.limiterReleaseMs = DEFAULTS.limiterReleaseMs;
+            return patch;
+        },
+        // 3 -> 4: the Depth default moved from 100% to 50% and the mid/high
+        // crossover from 2.5 kHz to 5 kHz (less of the presence region rides
+        // the high band's faster envelope). The popup's log-scale slider can
+        // only ever store values like 2504, never exactly 2500, so equality
+        // still separates "never touched" from "set deliberately".
+        (stored) => {
+            const patch = {};
+            if (stored.ottDepth === 1) patch.ottDepth = DEFAULTS.ottDepth;
+            if (stored.ottHighCrossHz === 2500) patch.ottHighCrossHz = DEFAULTS.ottHighCrossHz;
             return patch;
         }
     ];

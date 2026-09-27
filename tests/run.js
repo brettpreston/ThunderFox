@@ -159,7 +159,7 @@ console.log('\n== OTT ==');
 
 {
     // The crossover parameters actually move the split. A 300 Hz tone sits in
-    // the mid band at the stock 120/2500 Hz split; raising the low crossover
+    // the mid band at the stock 120/5000 Hz split; raising the low crossover
     // to 600 Hz moves it into the low band. The per-band floor envelope says
     // where the energy landed.
     const input = S.tone(300, 1, RATE, S.dbToGain(-12));
@@ -252,7 +252,7 @@ console.log('\n== OTT ==');
         { f: 60, band: 'low', bound: -22 },
         { f: 120, band: 'mid', bound: -30 },
         { f: 300, band: 'mid', bound: -35 },
-        { f: 5000, band: 'high', bound: -35 }
+        { f: 8000, band: 'high', bound: -40 }
     ].forEach(({ f, band, bound }) => {
         const input = S.tone(f, 2, RATE, S.dbToGain(-12));
         const out = ott.run(ott.create(), S.stereo(input), { depth: 1 })[0];

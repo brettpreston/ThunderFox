@@ -59,7 +59,7 @@
 // them; the split stays sum-flat wherever they sit, because the band sum is
 // AP(f1) * AP(f2) for any pair.
 const DEFAULT_LOW_CROSSOVER_HZ = 120;
-const DEFAULT_HIGH_CROSSOVER_HZ = 2500;
+const DEFAULT_HIGH_CROSSOVER_HZ = 5000;
 const MIN_CROSSOVER_HZ = 20;
 const MAX_CROSSOVER_HZ = 18000;
 
@@ -193,7 +193,7 @@ class OttProcessor extends AudioWorkletProcessor {
         // Input and output trims are GainNodes in the host graph (pre-boost
         // ahead, limiter drive behind), so the worklet does not duplicate them.
         const descriptors = [
-            { name: 'depth', defaultValue: 1, minValue: 0, maxValue: 1, automationRate: 'k-rate' },
+            { name: 'depth', defaultValue: 0.5, minValue: 0, maxValue: 1, automationRate: 'k-rate' },
             { name: 'mix', defaultValue: 1, minValue: 0, maxValue: 1, automationRate: 'k-rate' },
             { name: 'attack', defaultValue: 0.5, minValue: 0, maxValue: 1, automationRate: 'k-rate' },
             { name: 'release', defaultValue: 0.5, minValue: 0, maxValue: 1, automationRate: 'k-rate' },
