@@ -26,9 +26,19 @@ const exemptHint = document.getElementById('exemptHint');
 const ADVANCED_LAYOUT = [
     {
         group: 'Global', rows: [
-            { key: 'preBoostDb', label: 'Pre-boost' },
+            { key: 'preBoostDb', label: 'In gain' },
             { key: 'ottDepth', label: 'Depth' },
-            { key: 'ottTime', label: 'Time' }
+            { key: 'ottMix', label: 'Mix' },
+            { key: 'ottUpward', label: 'Upward' },
+            { key: 'ottDownward', label: 'Downward' },
+            { key: 'ottAttack', label: 'Attack' },
+            { key: 'ottRelease', label: 'Release' }
+        ]
+    },
+    {
+        group: 'Crossover', rows: [
+            { key: 'ottLowCrossHz', label: 'Low / Mid' },
+            { key: 'ottHighCrossHz', label: 'Mid / High' }
         ]
     },
     {
@@ -135,12 +145,16 @@ async function sendToActiveTab(message) {
 
 /* ----------------------------------------------------------- slider mapping */
 
-// Attack ranges span three orders of magnitude, so a linear slider would bunch
-// everything useful into the first few pixels. Decibels and percentages are
-// already perceptually even, so those map linearly.
+// Attack and crossover ranges span three orders of magnitude, so a linear
+// slider would bunch everything useful into the first few pixels. Decibels and
+// percentages are already perceptually even, so those map linearly.
+function isLogUnit(range) {
+    return (range.unit === 'ms' || range.unit === 'hz') && range.min > 0;
+}
+
 function sliderToValue(position, range) {
     const t = Number(position) / 100;
-    if (range.unit === 'ms' && range.min > 0) {
+    if (isLogUnit(range)) {
         return range.min * Math.pow(range.max / range.min, t);
     }
     return range.min + t * (range.max - range.min);
@@ -148,7 +162,7 @@ function sliderToValue(position, range) {
 
 function valueToSlider(value, range) {
     const clamped = S.clamp(value, range.min, range.max);
-    if (range.unit === 'ms' && range.min > 0) {
+    if (isLogUnit(range)) {
         return Math.round(100 * Math.log(clamped / range.min) / Math.log(range.max / range.min));
     }
     return Math.round(100 * (clamped - range.min) / (range.max - range.min));
@@ -159,6 +173,13 @@ function formatValue(value, range) {
     if (range.unit === 'db') {
         const sign = value > 0 ? '+' : '';
         return `${sign}${value.toFixed(1)} dB`;
+    }
+    if (range.unit === 'hz') {
+        if (value >= 1000) {
+            const kilo = value / 1000;
+            return `${kilo >= 10 ? kilo.toFixed(1) : kilo.toFixed(2)} kHz`;
+        }
+        return `${Math.round(value)} Hz`;
     }
     if (value < 1) return `${value.toFixed(2)} ms`;
     if (value < 10) return `${value.toFixed(1)} ms`;

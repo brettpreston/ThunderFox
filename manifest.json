@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ThunderFox Audio Enhancer",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Multiband upward/downward compression, an equaliser and a look-ahead brickwall limiter for web audio.",
   "action": {
     "default_title": "ThunderFox Audio Enhancer",

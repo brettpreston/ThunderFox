@@ -44,19 +44,12 @@ const ISP_LATENCY = ISP_TAPS - 1 - ISP_CENTRE;
 
 // The release parameter is the time to recover 99% of the gain reduction rather
 // than one time constant, so the number on the control matches what is heard.
-// ln(100) time constants gets there.
+// ln(100) time constants gets there. This is the "digital time constant" from
+// gin::Dynamics (FigBug's Gin, the engine behind the SocaLabs/slPlugins
+// Limiter), whose release this stage follows: a single exponential, rather
+// than the staged fast-then-slow recovery an earlier version used, whose
+// stage switch was audible as a kink in the release.
 const RECOVERY_DECADES = Math.log(100);
-
-// The first stage of the release is this many times faster than the second. A
-// brief dip finishes inside the fast stage; a sustained reduction spends most of
-// its recovery in the slow one, which is what stops bass pumping.
-//
-// "Brief" is measured from the moment the gain left unity, not from the last
-// time the envelope pushed it down. The stage used to restart on every push,
-// and under continuous limiting the envelope pushes on every cycle, so the
-// slow stage was never reached: a 120 ms release recovered in 24 ms and bass
-// through a driven limiter came out at -25 dB THD.
-const FAST_RELEASE_RATIO = 6;
 
 // Below this the release one-pole is denormal and costs a hardware penalty for
 // no audible benefit.
@@ -85,7 +78,7 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
             },
             {
                 name: 'release',
-                defaultValue: 0.12,
+                defaultValue: 0.08,
                 minValue: 0.005,
                 maxValue: 1,
                 automationRate: 'k-rate'
@@ -138,8 +131,6 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
         this.gain = 1;
         this.sampleIndex = 0;
         this.holdCountdown = 0;
-        // Samples since the gain last sat at unity. Chooses the release stage.
-        this.reductionAge = 0;
 
         // Doubled ring, so a tap loop can read ISP_TAPS consecutive samples
         // without a modulo on every tap.
@@ -210,7 +201,6 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
         this.gain = 1;
         this.sampleIndex = 0;
         this.holdCountdown = 0;
-        this.reductionAge = 0;
     }
 
     ensureChannels(channelCount) {
@@ -300,13 +290,9 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
         const ispEnabled = parameters.isp[0] >= 0.5;
 
         const releaseSeconds = parameters.release[0];
-        const slowSamples = Math.max(1, (releaseSeconds * sampleRate) / RECOVERY_DECADES);
-        const slowCoefficient = Math.exp(-1 / slowSamples);
-        const fastCoefficient = Math.exp(-1 / (slowSamples / FAST_RELEASE_RATIO));
+        const releaseTauSamples = Math.max(1, (releaseSeconds * sampleRate) / RECOVERY_DECADES);
+        const releaseCoefficient = Math.exp(-1 / releaseTauSamples);
         const holdSamples = Math.round(parameters.hold[0] * sampleRate);
-        // The fast stage is a sixth of the release, counted from the end of
-        // the hold, so a longer hold does not eat it.
-        const fastStageEnd = holdSamples + Math.max(1, (releaseSeconds * sampleRate) / FAST_RELEASE_RATIO);
 
         const requestedBox = Math.round(parameters.smoothing[0] * sampleRate);
         const boxLength = Math.max(1, Math.min(this.lookahead, requestedBox));
@@ -384,17 +370,14 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
             const smoothed = this.boxSum / this.boxCount;
 
             // Gain may fall as fast as the envelope demands but only recovers
-            // after the hold, and then in two stages: fast while the reduction
-            // is young, slow once it has persisted.
+            // after the hold, and then along a single exponential toward
+            // unity, gin::Dynamics style.
             let recovered;
             if (this.holdCountdown > 0) {
                 this.holdCountdown--;
                 recovered = this.gain;
             } else {
-                const coefficient = this.reductionAge < fastStageEnd
-                    ? fastCoefficient
-                    : slowCoefficient;
-                recovered = 1 + (this.gain - 1) * coefficient;
+                recovered = 1 + (this.gain - 1) * releaseCoefficient;
                 if (recovered > 1 - GAIN_SETTLED) recovered = 1;
             }
 
@@ -410,9 +393,6 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
             } else {
                 this.gain = recovered;
             }
-
-            if (this.gain >= 1) this.reductionAge = 0;
-            else this.reductionAge++;
 
             const readPos = this.delayPos + 1 === delayLength ? 0 : this.delayPos + 1;
             const gain = this.gain;

@@ -45,42 +45,61 @@ var ThunderFoxSettings = (function() {
 
         preBoostDb: 0,
 
-        ottDepth: 0.35,
-        ottTime: 0.5,
+        // OTT's stock preset, per vitOTT: full depth and mix, both directions
+        // at 1x, knobs at their base times, band ratios 0.8 up and
+        // 0.9/0.857/1.0 down, band gains +16.3/+11.7/+16.3 dB. The band gain
+        // is scaled by Depth inside the worklet, so the Loudness macro's low
+        // end stays gentle.
+        ottDepth: 1,
+        ottMix: 1,
+        ottAttack: 0.5,
+        ottRelease: 0.5,
+        ottUpward: 1,
+        ottDownward: 1,
+        ottLowCrossHz: 120,
+        ottHighCrossHz: 2500,
         ottLowUp: 0.8,
-        ottLowDown: 0.8,
-        ottLowGainDb: 0,
+        ottLowDown: 0.9,
+        ottLowGainDb: 16.3,
         ottMidUp: 0.8,
-        ottMidDown: 0.8,
-        ottMidGainDb: 0,
+        ottMidDown: 0.857,
+        ottMidGainDb: 11.7,
         ottHighUp: 0.8,
-        ottHighDown: 0.8,
-        ottHighGainDb: 0,
+        ottHighDown: 1,
+        ottHighGainDb: 16.3,
 
         limiterAttackMs: 2.5,
-        limiterReleaseMs: 120,
+        limiterReleaseMs: 80,
         limiterHoldMs: 20,
         limiterCeilingDb: -0.3,
         limiterIsp: true
     };
 
     // unit drives both the slider mapping and the readout: 'db' and 'percent'
-    // are linear, 'ms' is logarithmic because attack ranges span three orders of
-    // magnitude and a linear slider buries everything useful in the first pixels.
+    // are linear; 'ms' and 'hz' are logarithmic because those ranges span three
+    // orders of magnitude and a linear slider buries everything useful in the
+    // first pixels. The crossover range (20 Hz - 18 kHz on both, defaults
+    // 120 / 2500 Hz) is vitOTTx's.
     const LIMITS = {
         preBoostDb: { min: 0, max: 24, unit: 'db' },
 
         ottDepth: { min: 0, max: 1, unit: 'percent' },
-        ottTime: { min: 0, max: 1, unit: 'percent' },
+        ottMix: { min: 0, max: 1, unit: 'percent' },
+        ottAttack: { min: 0, max: 1, unit: 'percent' },
+        ottRelease: { min: 0, max: 1, unit: 'percent' },
+        ottUpward: { min: 0, max: 2, unit: 'percent' },
+        ottDownward: { min: 0, max: 2, unit: 'percent' },
+        ottLowCrossHz: { min: 20, max: 18000, unit: 'hz' },
+        ottHighCrossHz: { min: 20, max: 18000, unit: 'hz' },
         ottLowUp: { min: 0, max: 1, unit: 'percent' },
         ottLowDown: { min: 0, max: 1, unit: 'percent' },
-        ottLowGainDb: { min: -20, max: 20, unit: 'db' },
+        ottLowGainDb: { min: -30, max: 30, unit: 'db' },
         ottMidUp: { min: 0, max: 1, unit: 'percent' },
         ottMidDown: { min: 0, max: 1, unit: 'percent' },
-        ottMidGainDb: { min: -20, max: 20, unit: 'db' },
+        ottMidGainDb: { min: -30, max: 30, unit: 'db' },
         ottHighUp: { min: 0, max: 1, unit: 'percent' },
         ottHighDown: { min: 0, max: 1, unit: 'percent' },
-        ottHighGainDb: { min: -20, max: 20, unit: 'db' },
+        ottHighGainDb: { min: -30, max: 30, unit: 'db' },
 
         limiterAttackMs: { min: 0.2, max: 5, unit: 'ms' },
         limiterReleaseMs: { min: 10, max: 1000, unit: 'ms' },
@@ -96,7 +115,7 @@ var ThunderFoxSettings = (function() {
     // Stored values silently override DEFAULTS, so without this a changed
     // default only ever reaches fresh installs. Storage that predates the key
     // is version 0.
-    const SETTINGS_VERSION = 2;
+    const SETTINGS_VERSION = 3;
 
     function clamp(value, min, max) {
         return Math.max(min, Math.min(max, value));
@@ -128,6 +147,26 @@ var ThunderFoxSettings = (function() {
         (stored) => {
             const patch = {};
             if (stored.limiterHoldMs === 2) patch.limiterHoldMs = DEFAULTS.limiterHoldMs;
+            return patch;
+        },
+        // 2 -> 3: the multiband stage became a port of Vital's OTT. The Time
+        // knob split into Attack and Release (a set value carries over to
+        // both); the Down ratios, band gains, Depth and the limiter release
+        // moved to OTT's stock preset where they still equal the old default.
+        (stored) => {
+            const patch = {};
+            if (isFiniteNumber(stored.ottTime) && stored.ottTime !== 0.5) {
+                patch.ottAttack = clamp(stored.ottTime, 0, 1);
+                patch.ottRelease = patch.ottAttack;
+            }
+            if (stored.ottDepth === 0.35) patch.ottDepth = DEFAULTS.ottDepth;
+            ['ottLowDown', 'ottMidDown', 'ottHighDown'].forEach((key) => {
+                if (stored[key] === 0.8) patch[key] = DEFAULTS[key];
+            });
+            ['ottLowGainDb', 'ottMidGainDb', 'ottHighGainDb'].forEach((key) => {
+                if (stored[key] === 0) patch[key] = DEFAULTS[key];
+            });
+            if (stored.limiterReleaseMs === 120) patch.limiterReleaseMs = DEFAULTS.limiterReleaseMs;
             return patch;
         }
     ];

@@ -780,7 +780,13 @@
             preGain: dbToGain(advanced.preBoostDb),
             drive: dbToGain(loudness.driveDb),
             depth,
-            time: advanced.ottTime,
+            mix: advanced.ottMix,
+            attack: advanced.ottAttack,
+            release: advanced.ottRelease,
+            upward: advanced.ottUpward,
+            downward: advanced.ottDownward,
+            lowCrossHz: advanced.ottLowCrossHz,
+            highCrossHz: advanced.ottHighCrossHz,
             lowUp: advanced.ottLowUp,
             lowDown: advanced.ottLowDown,
             lowGainDb: advanced.ottLowGainDb,
@@ -792,7 +798,7 @@
             highGainDb: advanced.ottHighGainDb,
             ceiling: dbToGain(advanced.limiterCeilingDb),
             smoothing: msToSeconds(advanced.limiterAttackMs),
-            release: msToSeconds(advanced.limiterReleaseMs),
+            limiterRelease: msToSeconds(advanced.limiterReleaseMs),
             hold: msToSeconds(advanced.limiterHoldMs),
             isp: advanced.limiterIsp ? 1 : 0
         };
@@ -803,14 +809,16 @@
         if (changed('drive')) rampParam(STATE.limiter.drive.gain, targets.drive);
 
         const ott = STATE.ott.parameters;
-        ['depth', 'time', 'lowUp', 'lowDown', 'lowGainDb', 'midUp', 'midDown', 'midGainDb',
+        ['depth', 'mix', 'attack', 'release', 'upward', 'downward',
+            'lowCrossHz', 'highCrossHz',
+            'lowUp', 'lowDown', 'lowGainDb', 'midUp', 'midDown', 'midGainDb',
             'highUp', 'highDown', 'highGainDb'].forEach((key) => {
             if (changed(key)) rampParam(ott.get(key), targets[key]);
         });
 
         const limiter = STATE.limiter.parameters;
         if (changed('ceiling')) rampParam(limiter.get('ceiling'), targets.ceiling);
-        if (changed('release')) rampParam(limiter.get('release'), targets.release);
+        if (changed('limiterRelease')) rampParam(limiter.get('release'), targets.limiterRelease);
         if (changed('hold')) rampParam(limiter.get('hold'), targets.hold);
         // Structural: these become buffer lengths inside the worklet.
         if (changed('smoothing')) setParam(limiter.get('smoothing'), targets.smoothing);

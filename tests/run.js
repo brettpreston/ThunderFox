@@ -133,14 +133,47 @@ console.log('\n== OTT ==');
 
 {
     // Depth 0 must be transparent in level at every band: the split sums to an
-    // allpass pair, so magnitude is flat.
-    [40, 88.3, 300, 1000, 2500, 8000].forEach((frequency) => {
+    // allpass pair, so magnitude is flat, the ratios scale to zero and the
+    // band gains (which scale with depth) go to 0 dB.
+    [40, 120, 300, 1000, 2500, 8000].forEach((frequency) => {
         const input = S.tone(frequency, 1, RATE, S.dbToGain(-12));
         const out = ott.run(ott.create(), S.stereo(input), { depth: 0 })[0];
         const error = S.gainToDb(S.rms(out, RATE / 2) / S.rms(input, RATE / 2));
         check(`depth 0 is flat at ${frequency} Hz`, Math.abs(error) < 0.15 && !S.hasNonFinite(out),
             `${fmt(error, 3)} dB`);
     });
+}
+
+{
+    // Moving the crossovers must not break the flat sum: the three bands
+    // reconstruct to AP(f1) * AP(f2) wherever f1 and f2 sit.
+    [40, 300, 1000, 8000].forEach((frequency) => {
+        const input = S.tone(frequency, 1, RATE, S.dbToGain(-12));
+        const out = ott.run(ott.create(), S.stereo(input),
+            { depth: 0, lowCrossHz: 250, highCrossHz: 6000 })[0];
+        const error = S.gainToDb(S.rms(out, RATE / 2) / S.rms(input, RATE / 2));
+        check(`depth 0 is flat at ${frequency} Hz with crossovers at 250/6000`, Math.abs(error) < 0.15 && !S.hasNonFinite(out),
+            `${fmt(error, 3)} dB`);
+    });
+}
+
+{
+    // The crossover parameters actually move the split. A 300 Hz tone sits in
+    // the mid band at the stock 120/2500 Hz split; raising the low crossover
+    // to 600 Hz moves it into the low band. The per-band floor envelope says
+    // where the energy landed.
+    const input = S.tone(300, 1, RATE, S.dbToGain(-12));
+    const bandLevels = (params) => {
+        const processor = ott.create();
+        ott.run(processor, S.stereo(input), params);
+        return Array.from(processor.floorEnvelope);
+    };
+    const stock = bandLevels({ depth: 1 });
+    const moved = bandLevels({ depth: 1, lowCrossHz: 600 });
+    check('300 Hz lands in the mid band at the stock crossover', stock[1] > stock[0] * 10,
+        `low ${fmt(10 * Math.log10(stock[0] + 1e-20), 1)} dB vs mid ${fmt(10 * Math.log10(stock[1] + 1e-20), 1)} dB`);
+    check('raising the low crossover to 600 Hz moves 300 Hz into the low band', moved[0] > moved[1] * 10,
+        `low ${fmt(10 * Math.log10(moved[0] + 1e-20), 1)} dB vs mid ${fmt(10 * Math.log10(moved[1] + 1e-20), 1)} dB`);
 }
 
 {
@@ -152,99 +185,133 @@ console.log('\n== OTT ==');
 }
 
 {
-    // The Time knob: a level step up (attack) and down (release) in the mid
-    // band. The 63% time must grow with Time, and by a lot: the knob spans
-    // about two orders of magnitude.
-    // The gain is read from the processor after each render quantum rather
-    // than inferred from the output: a level step leaves the crossover
-    // filters ringing with the old level, which corrupts an output-based
-    // estimate for tens of milliseconds. Resolution is one quantum, 2.7 ms.
-    const results = [0, 0.25, 0.5, 0.75, 1].map((time) => {
+    // The OTT transfer curve: quiet content comes up, loud content comes
+    // down, so the level range shrinks. A -50 dB mid-band tone sits below the
+    // lower threshold and must be boosted well past its makeup; the span
+    // between a -50 dB and a -6 dB input must come out much narrower.
+    const quiet = S.tone(1000, 2, RATE, S.dbToGain(-50));
+    const loud = S.tone(1000, 2, RATE, S.dbToGain(-6));
+    const quietOut = ott.run(ott.create(), S.stereo(quiet), { depth: 1 })[0];
+    const loudOut = ott.run(ott.create(), S.stereo(loud), { depth: 1 })[0];
+    const quietGain = S.gainToDb(S.rms(quietOut, RATE) / S.rms(quiet, RATE));
+    const loudGain = S.gainToDb(S.rms(loudOut, RATE) / S.rms(loud, RATE));
+    const rangeIn = 44;
+    const rangeOut = rangeIn + loudGain - quietGain;
+    check('upward compression lifts a -50 dB tone above its makeup', quietGain > 13,
+        `${fmt(quietGain, 1)} dB (makeup alone is 11.7)`);
+    check('the -50..-6 dB range is compressed', rangeOut < rangeIn - 8,
+        `${fmt(rangeIn, 0)} dB in -> ${fmt(rangeOut, 1)} dB out`);
+}
+
+{
+    // The Attack and Release knobs: a level step up (attack) and down
+    // (release) in the mid band. The 63% time must grow with the knob, and by
+    // a lot: each knob spans exp(±4), about 55x each way off the band's base
+    // time. The gain is read from the processor after each render quantum
+    // rather than inferred from the output; resolution is one quantum, 2.7 ms.
+    const attacks = [0, 0.5, 1].map((attack) => {
         const input = S.steppedTone(1000, RATE, [
             { db: -40, until: 1.0 },
-            { db: -6, until: 2.0 },
-            { db: -40, until: 4.0 }
+            { db: -6, until: 2.5 }
         ]);
         const track = [];
-        ott.run(ott.create(), S.stereo(input), { depth: 1, time }, (processor, start) => {
+        ott.run(ott.create(), S.stereo(input), { depth: 1, attack }, (processor, start) => {
             track.push({ time: start / RATE, db: S.gainToDb(processor.bandGain[1]) });
         });
-        return {
-            time,
-            attack: S.timeConstant(track, 1.0, 1.9, 0),
-            release: S.timeConstant(track, 2.0, 3.9, 0)
-        };
+        return S.timeConstant(track, 1.0, 2.4, 0);
     });
-    results.forEach((r) => note(`time ${r.time}: attack ${fmt(r.attack * 1000, 1)} ms, release ${fmt(r.release * 1000, 1)} ms`));
-    const attacks = results.map((r) => r.attack);
-    const releases = results.map((r) => r.release);
-    const monotonic = (list) => list.every((v, i) => i === 0 || v >= list[i - 1]);
-    check('Time knob lengthens attack monotonically', monotonic(attacks) && attacks[4] > attacks[0] * 10,
-        `${fmt(attacks[0] * 1000, 1)} ms -> ${fmt(attacks[4] * 1000, 1)} ms`);
-    check('Time knob lengthens release monotonically', monotonic(releases) && releases[4] > releases[0] * 10,
-        `${fmt(releases[0] * 1000, 1)} ms -> ${fmt(releases[4] * 1000, 1)} ms`);
-}
-
-{
-    // Smoothness: a steady tone in each band at full depth. Gain moving within
-    // a cycle is harmonic distortion; a compressor that is not pumping on its
-    // own input should stay well under -50 dB. Time 0 is a 6 ms release, and
-    // what a 30 Hz tone leaks into the mid band (about -37 dB through the
-    // crossover) is modulated by that band's shorter hold, so the fastest
-    // setting gets a looser bound.
-    [{ f: 30, band: 'low' }, { f: 60, band: 'low' }, { f: 120, band: 'mid' }, { f: 300, band: 'mid' }, { f: 5000, band: 'high' }]
-        .forEach(({ f, band }) => {
-            [0, 0.25, 0.5].forEach((time) => {
-                const bound = time === 0 ? -40 : -50;
-                const input = S.tone(f, 2, RATE, S.dbToGain(-12));
-                const out = ott.run(ott.create(), S.stereo(input), { depth: 1, time })[0];
-                const thd = S.thdDb(out, f, RATE, RATE, 2 * RATE);
-                check(`${band} band ${f} Hz, time ${time}: distortion under ${bound} dB`, thd < bound,
-                    `THD ${fmt(thd, 1)} dB`);
-            });
+    const releases = [0, 0.5, 1].map((release) => {
+        const input = S.steppedTone(1000, RATE, [
+            { db: -6, until: 1.0 },
+            { db: -40, until: 6.0 }
+        ]);
+        const track = [];
+        ott.run(ott.create(), S.stereo(input), { depth: 1, release }, (processor, start) => {
+            track.push({ time: start / RATE, db: S.gainToDb(processor.bandGain[1]) });
         });
+        return S.timeConstant(track, 1.0, 5.5, 0);
+    });
+    note(`attack knob 0/0.5/1: ${attacks.map((a) => `${fmt(a * 1000, 1)} ms`).join(', ')}`);
+    note(`release knob 0/0.5/1: ${releases.map((r) => `${fmt(r * 1000, 1)} ms`).join(', ')}`);
+    const monotonic = (list) => list.every((v, i) => i === 0 || v >= list[i - 1]);
+    check('Attack knob lengthens attack monotonically', monotonic(attacks) && attacks[2] > attacks[0] * 10,
+        `${fmt(attacks[0] * 1000, 1)} ms -> ${fmt(attacks[2] * 1000, 1)} ms`);
+    check('Release knob lengthens release monotonically', monotonic(releases) && releases[2] > releases[0] * 10,
+        `${fmt(releases[0] * 1000, 1)} ms -> ${fmt(releases[2] * 1000, 1)} ms`);
 }
 
 {
-    // A kick and bass pattern, low band gain read every sample. The gain must
-    // move smoothly: a step of more than a small fraction of a dB between two
-    // samples is a click, and that is what the low band did at every kick
-    // onset before the attack floor (1.4 dB per sample). Modulation above
-    // 15 Hz is reported for comparison.
+    // Steady-tone distortion per band at the default knobs. Vital's envelope
+    // is an asymmetric one-pole on the squared sample, so it ripples a little
+    // at twice the tone frequency — that grit is part of the OTT sound and
+    // the bounds say how much of it is normal, not that it is absent. The
+    // low band's 40 ms base release against a 40 Hz half-period is the worst
+    // case; higher bands smooth their ripple far below audibility.
+    [
+        { f: 40, band: 'low', bound: -18 },
+        { f: 60, band: 'low', bound: -22 },
+        { f: 120, band: 'mid', bound: -30 },
+        { f: 300, band: 'mid', bound: -35 },
+        { f: 5000, band: 'high', bound: -35 }
+    ].forEach(({ f, band, bound }) => {
+        const input = S.tone(f, 2, RATE, S.dbToGain(-12));
+        const out = ott.run(ott.create(), S.stereo(input), { depth: 1 })[0];
+        const thd = S.thdDb(out, f, RATE, RATE, 2 * RATE);
+        check(`${band} band ${f} Hz at default knobs: distortion under ${bound} dB`, thd < bound,
+            `THD ${fmt(thd, 1)} dB`);
+    });
+}
+
+{
+    // A kick and bass pattern, low band gain read every sample. Vital's
+    // envelope takes multiplicative steps, so a kick onset moves the gain by
+    // a few dB per sample at the start of the attack — that snap is the OTT
+    // attack. What must not happen is an unbounded step or a non-finite gain.
     const input = S.kickBass(3, RATE);
-    [{ depth: 0.49, time: 0.5 }, { depth: 1, time: 0.5 }, { depth: 1, time: 0.25 }].forEach((cfg) => {
+    [{ depth: 0.5 }, { depth: 1 }].forEach((cfg) => {
         const gain = new Float32Array(input.length);
+        let finite = true;
         ott.run(ott.create(), S.stereo(input), cfg, (processor, i) => {
             gain[i] = S.gainToDb(processor.bandGain[0]);
+            if (!isFinite(gain[i])) finite = false;
         }, 1);
         const rough = S.gainRoughness(gain, RATE, 1, 15);
-        check(`kick and bass, depth ${cfg.depth}, time ${cfg.time}: low band gain has no steps`, rough.maxStepDb < 0.05,
-            `max ${fmt(rough.maxStepDb, 3)} dB/sample, ${fmt(rough.modulationDb, 2)} dB rms above 15 Hz`);
+        check(`kick and bass, depth ${cfg.depth}: low band gain stays bounded`, finite && rough.maxStepDb < 8,
+            `max ${fmt(rough.maxStepDb, 2)} dB/sample, ${fmt(rough.modulationDb, 2)} dB rms above 15 Hz`);
     });
 }
 
 {
-    // Quiet, wobbling low-band content, like a room tone or a reverb tail: the
-    // floor fade must not act as a fast expander on it. Before the fade was
-    // given its own slow envelope this swung 6.5 dB at full depth.
+    // Quiet, wobbling low-band content, like a room tone or a reverb tail.
+    // The upward stage legitimately counters the wobble now, but the fade
+    // near the floor must not turn it into an expander: the output's level
+    // swing may not exceed the input's.
     const input = S.wobblingTone(40, 4, RATE, -65, 6, 5);
-    [0.49, 1].forEach((depth) => {
+    const levelSwing = (signal) => {
+        const window = Math.round(0.05 * RATE);
         let min = Infinity;
         let max = -Infinity;
-        ott.run(ott.create(), S.stereo(input), { depth, time: 0.5 }, (processor, i) => {
-            if (i < 2 * RATE) return;
-            const db = S.gainToDb(processor.bandGain[0]);
+        for (let start = 2 * RATE; start + window <= signal.length; start += window) {
+            const db = S.gainToDb(S.rms(signal, start, start + window));
             if (db < min) min = db;
             if (db > max) max = db;
-        });
-        check(`quiet wobbling bass, depth ${depth}: low band gain swing under 2 dB`, max - min < 2,
-            `${fmt(max - min, 2)} dB peak to peak`);
+        }
+        return max - min;
+    };
+    const inSwing = levelSwing(input);
+    [0.5, 1].forEach((depth) => {
+        const out = ott.run(ott.create(), S.stereo(input), { depth })[0];
+        const outSwing = levelSwing(out);
+        check(`quiet wobbling bass, depth ${depth}: output swing does not exceed the input's`,
+            outSwing < inSwing + 0.5 && !S.hasNonFinite(out),
+            `${fmt(outSwing, 2)} dB out vs ${fmt(inSwing, 2)} dB in`);
     });
 }
 
 {
-    // Silence must stay silent: upward compression and makeup fade out below
-    // the floor rather than lifting the noise floor.
+    // Silence must stay silent: the upward stage and the positive band gain
+    // fade out below the floor rather than lifting the noise floor by the
+    // 30 dB the expand clamp would otherwise allow.
     const input = S.tone(1000, 1, RATE, S.dbToGain(-90));
     const out = ott.run(ott.create(), S.stereo(input), { depth: 1 })[0];
     const lift = S.gainToDb(S.rms(out, RATE / 2) / S.rms(input, RATE / 2));
