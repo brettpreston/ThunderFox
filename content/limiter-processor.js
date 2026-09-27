@@ -44,11 +44,9 @@ const ISP_LATENCY = ISP_TAPS - 1 - ISP_CENTRE;
 
 // The release parameter is the time to recover 99% of the gain reduction rather
 // than one time constant, so the number on the control matches what is heard.
-// ln(100) time constants gets there. This is the "digital time constant" from
-// gin::Dynamics (FigBug's Gin, the engine behind the SocaLabs/slPlugins
-// Limiter), whose release this stage follows: a single exponential, rather
-// than the staged fast-then-slow recovery an earlier version used, whose
-// stage switch was audible as a kink in the release.
+// ln(100) time constants gets there. Recovery is a single exponential toward
+// unity, rather than the staged fast-then-slow recovery an earlier version
+// used, whose stage switch was audible as a kink in the release.
 const RECOVERY_DECADES = Math.log(100);
 
 // Below this the release one-pole is denormal and costs a hardware penalty for
@@ -371,7 +369,7 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
 
             // Gain may fall as fast as the envelope demands but only recovers
             // after the hold, and then along a single exponential toward
-            // unity, gin::Dynamics style.
+            // unity.
             let recovered;
             if (this.holdCountdown > 0) {
                 this.holdCountdown--;

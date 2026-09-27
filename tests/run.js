@@ -241,8 +241,8 @@ console.log('\n== OTT ==');
 }
 
 {
-    // Steady-tone distortion per band at the default knobs. Vital's envelope
-    // is an asymmetric one-pole on the squared sample, so it ripples a little
+    // Steady-tone distortion per band at the default knobs. The detector
+    // envelope is an asymmetric one-pole on the squared sample, so it ripples
     // at twice the tone frequency — that grit is part of the OTT sound and
     // the bounds say how much of it is normal, not that it is absent. The
     // low band's 40 ms base release against a 40 Hz half-period is the worst
@@ -263,7 +263,7 @@ console.log('\n== OTT ==');
 }
 
 {
-    // A kick and bass pattern, low band gain read every sample. Vital's
+    // A kick and bass pattern, low band gain read every sample. The detector
     // envelope takes multiplicative steps, so a kick onset moves the gain by
     // a few dB per sample at the start of the attack — that snap is the OTT
     // attack. What must not happen is an unbounded step or a non-finite gain.

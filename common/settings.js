@@ -45,7 +45,7 @@ var ThunderFoxSettings = (function() {
 
         preBoostDb: 0,
 
-        // OTT's stock preset, per vitOTT: full depth and mix, both directions
+        // The OTT-style stock preset: full depth and mix, both directions
         // at 1x, knobs at their base times, band ratios 0.8 up and
         // 0.9/0.857/1.0 down, band gains +16.3/+11.7/+16.3 dB. The band gain
         // is scaled by Depth inside the worklet, so the Loudness macro's low
@@ -78,8 +78,7 @@ var ThunderFoxSettings = (function() {
     // unit drives both the slider mapping and the readout: 'db' and 'percent'
     // are linear; 'ms' and 'hz' are logarithmic because those ranges span three
     // orders of magnitude and a linear slider buries everything useful in the
-    // first pixels. The crossover range (20 Hz - 18 kHz on both, defaults
-    // 120 / 2500 Hz) is vitOTTx's.
+    // first pixels. The crossover range is 20 Hz - 18 kHz on both.
     const LIMITS = {
         preBoostDb: { min: 0, max: 24, unit: 'db' },
 
@@ -149,10 +148,11 @@ var ThunderFoxSettings = (function() {
             if (stored.limiterHoldMs === 2) patch.limiterHoldMs = DEFAULTS.limiterHoldMs;
             return patch;
         },
-        // 2 -> 3: the multiband stage became a port of Vital's OTT. The Time
-        // knob split into Attack and Release (a set value carries over to
-        // both); the Down ratios, band gains, Depth and the limiter release
-        // moved to OTT's stock preset where they still equal the old default.
+        // 2 -> 3: the multiband stage was rebuilt around the OTT-style stock
+        // preset. The Time knob split into Attack and Release (a set value
+        // carries over to both); the Down ratios, band gains, Depth and the
+        // limiter release moved to the stock preset where they still equal
+        // the old default.
         (stored) => {
             const patch = {};
             if (isFiniteNumber(stored.ottTime) && stored.ottTime !== 0.5) {

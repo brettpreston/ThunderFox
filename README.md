@@ -6,7 +6,7 @@ The processing has three stages: an OTT-style multiband compressor, a graphic eq
 
 ## Features
 
-- Three-band upward **and** downward compression in an AudioWorklet — a port of the OTT compressor from Matt Tytel's [Vital](https://github.com/mtytel/vital), as packaged by [vitOTT](https://github.com/edgjj/vitOTT)/[vitOTTx](https://github.com/Sakhnovkrg/vitOTTx) — split by a 4th-order Linkwitz-Riley crossover at 120 Hz and 2.5 kHz (adjustable under Advanced).
+- Three-band upward **and** downward ("OTT-style") compression in an AudioWorklet, split by a 4th-order Linkwitz-Riley crossover at 120 Hz and 2.5 kHz (adjustable under Advanced).
 - OTT's controls: **Depth**, **Mix**, **Attack**, **Release**, global **Upward**/**Downward**, plus per-band Up, Down and Gain, with OTT's stock preset as the defaults.
 - A true look-ahead brickwall limiter in an AudioWorklet: no clipping, no saturation, no waveshaping. Material below the ceiling passes through untouched.
 - **Inter-sample peak (true peak) detection** in the limiter, so the output does not overshoot 0 dBFS once a downstream resampler or codec reconstructs it.
@@ -54,7 +54,7 @@ because `(s^2 + 1)^2 - 2 s^2 = s^4 + 1`. Splitting twice therefore leaves the lo
 
  Each band and channel runs two asymmetric one-pole envelopes on the *squared* sample — one for the downward stage, one for the upward — with per-band base times (low 2.8/40 ms, mid 1.4/28 ms, high 0.7/15 ms attack/release) that the Attack and Release knobs scale exponentially. The downward envelope is clamped to at least the upper threshold and the upward envelope to at most the lower threshold, so each stage is exactly unity until its threshold is crossed. The gain is a power law of the envelope's distance from threshold, and the combined upward gain is clamped at +30 dB. Channels are **not** linked — left and right compress independently, as in OTT.
 
-Two web-specific deviations from Vital: the band gains (OTT's +16.3/+11.7/+16.3 dB makeup) are scaled by Depth, so Depth 0 is a true bypass and the Loudness macro's low end stays gentle; and the upward stage plus the positive band gain fade out between −60 and −80 dBFS on a slow envelope of their own (20 ms up, 400 ms down). Without that fade, a noise floor or the gap between tracks comes up by 30 dB plus makeup.
+Two web-specific behaviours: the band gains (the stock +16.3/+11.7/+16.3 dB makeup) are scaled by Depth, so Depth 0 is a true bypass and the Loudness macro's low end stays gentle; and the upward stage plus the positive band gain fade out between −60 and −80 dBFS on a slow envelope of their own (20 ms up, 400 ms down). Without that fade, a noise floor or the gap between tracks comes up by 30 dB plus makeup.
 
 ## The Loudness control
 
@@ -107,7 +107,7 @@ The Advanced section is off by default. While it is off, the built-in defaults a
 | Mix | 0-100% | 100% | Per-band dry/wet blend |
 | Upward / Downward | 0-200% | 100% | Global multiplier on each compression direction |
 | Attack / Release | 0-100% | 50% | Envelope times, all bands (exponential, ±55x around the base) |
-| Low / Mid, Mid / High | 20 Hz to 18 kHz | 120 Hz / 2.5 kHz | Crossover frequencies of the band split (vitOTTx's range) |
+| Low / Mid, Mid / High | 20 Hz to 18 kHz | 120 Hz / 2.5 kHz | Crossover frequencies of the band split |
 | Up / Down | 0-100% | OTT preset | Per-band ratio of each compression direction |
 | Gain | ±30 dB | +16.3 / +11.7 / +16.3 dB | Per-band output gain (OTT's makeup), scaled by Depth |
 | Attack (limiter) | 0.2-5 ms | 2.5 ms | Limiter gain-envelope smoothing |
@@ -116,19 +116,19 @@ The Advanced section is off by default. While it is off, the built-in defaults a
 | Ceiling | −3 to 0 dB | −0.3 dB | Limiter output ceiling |
 | True peak | on/off | on | Inter-sample peak detection |
 
-**Attack and Release** scale each band's base envelope times exponentially: 50% is the base (low 2.8/40 ms, mid 1.4/28 ms, high 0.7/15 ms), the ends are about 55 times faster or slower. These are Vital's knob mappings. Below about −60 dBFS in a band, the upward gain and the positive band gain fade out so silence stays silent; that fade follows its own slow envelope (20 ms up, 400 ms down) so it closes on a genuine pause rather than fluttering on quiet content.
+**Attack and Release** scale each band's base envelope times exponentially: 50% is the base (low 2.8/40 ms, mid 1.4/28 ms, high 0.7/15 ms), the ends are about 55 times faster or slower. Below about −60 dBFS in a band, the upward gain and the positive band gain fade out so silence stays silent; that fade follows its own slow envelope (20 ms up, 400 ms down) so it closes on a genuine pause rather than fluttering on quiet content.
 
-**Up and Down** are OTT's per-band ratios. At 100% Down with full Depth a band is pinned to its upper threshold; smaller values are gentler. The stock preset is 80% Up on every band and 90/85.7/100% Down.
+**Up and Down** are the per-band ratios. At 100% Down with full Depth a band is pinned to its upper threshold; smaller values are gentler. The stock preset is 80% Up on every band and 90/85.7/100% Down.
 
 **Attack (limiter)** is the width of the limiter's gain smoothing, not a conventional attack time. A look-ahead limiter has no attack in the usual sense, because the gain is already in position when the peak arrives; what this sets is how gradually it gets there. It is capped at the worklet's 5 ms look-ahead, since the envelope cannot be smoothed over more samples than it can see.
 
-**Release (limiter)** is the time to recover 99% of the gain reduction, not one time constant. Recovery is a single exponential toward unity, the digital time constant from `gin::Dynamics` (the engine behind the SocaLabs Limiter): a 100 ms release reaches 99% of the way back in about 100 ms, and there is no stage switch to hear.
+**Release (limiter)** is the time to recover 99% of the gain reduction, not one time constant. Recovery is a single exponential toward unity: a 100 ms release reaches 99% of the way back in about 100 ms, and there is no stage switch to hear.
 
 **Hold** keeps the gain where it is for that long after the envelope last asked for it, and restarts each time it asks again. The 20 ms default covers one half-cycle down to 25 Hz, which is what keeps a driven limiter from modulating bass within the cycle.
 
-**In gain** sits before the crossover, so it drives the compressors harder rather than just making things louder. It is OTT's input gain.
+**In gain** sits before the crossover, so it drives the compressors harder rather than just making things louder.
 
-**Low / Mid and Mid / High** move the two crossover points, as in vitOTTx. The split stays sum-flat wherever they sit, because the three bands always reconstruct to the same allpass pair. The two are deliberately unconstrained against each other — crossing them over inverts the mid band into a narrow overlap remnant, which is also what vitOTTx does.
+**Low / Mid and Mid / High** move the two crossover points. The split stays sum-flat wherever they sit, because the three bands always reconstruct to the same allpass pair.
 
 The time and frequency sliders are logarithmic, because a linear control across three orders of magnitude would bunch every useful value into the first few pixels. Decibels and percentages are linear.
 

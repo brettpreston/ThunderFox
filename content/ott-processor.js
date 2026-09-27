@@ -1,15 +1,10 @@
 'use strict';
 
 /**
- * Three-band upward and downward compressor: a port of the OTT multiband
- * compressor from Matt Tytel's Vital (GPLv3), as packaged by vitOTT/vitOTTx
- * (https://github.com/Sakhnovkrg/vitOTTx). The detector, gain law, time
- * constants, thresholds and default ratios below are Vital's; what follows
- * describes the algorithm and where this port deviates.
+ * Three-band upward and downward ("OTT-style") multiband compressor.
  *
- * The band split is a 4th-order Linkwitz-Riley tree, exactly equivalent to
- * Vital's (Vital runs the low band through the second crossover and sums both
- * halves, which *is* the allpass at f2; here the allpass is explicit). LR4 is
+ * The band split is a 4th-order Linkwitz-Riley tree with an explicit allpass
+ * on the low band so the three bands stay phase-coherent. LR4 is
  * two cascaded Butterworth sections at the same cutoff, and its two halves sum
  * to a second-order allpass rather than to unity:
  *
@@ -40,30 +35,29 @@
  * Upward/Downward multipliers, clamped to [0, 1]. An exponent of 0.5 on the
  * power ratio is a hard limit to the threshold; smaller is gentler.
  *
- * Channels are NOT linked: left and right compress independently, as in
- * Vital. That per-channel gain riding is part of the OTT sound.
+ * Channels are NOT linked: left and right compress independently. That
+ * per-channel gain riding is part of the OTT-style sound.
  *
  * Per band, the output is a dry/wet blend of the band against its compressed,
- * gain-trimmed self (Vital's Mix), summed across bands:
+ * gain-trimmed self (the Mix control), summed across bands:
  *
  *   out_band = in * (1 - mix) + in * gain * bandGain * mix
  *
- * Deviations from Vital, both for unattended web playback:
+ * Two behaviours specific to unattended web playback:
  *
- * - The band gain (OTT's +16.3 / +11.7 / +16.3 dB makeup) is scaled by Depth.
- *   In Vital it is independent, so Depth 0 still boosts by the band gains;
- *   here Depth 0 is bit-exact bypass apart from the crossover's own allpass.
- *   The scaling is proportionate: the downward reduction of a full-scale
- *   signal also scales linearly with Depth.
+ * - The band gain (the stock +16.3 / +11.7 / +16.3 dB makeup) is scaled by
+ *   Depth, so Depth 0 is bit-exact bypass apart from the crossover's own
+ *   allpass. The scaling is proportionate: the downward reduction of a
+ *   full-scale signal also scales linearly with Depth.
  * - Upward compression cannot tell a quiet passage from a noise floor, so its
  *   exponent and the positive part of the band gain fade out below
  *   FLOOR_TOP_DB, driven by a slow envelope of their own. Without this,
  *   silence between tracks comes up by 30 dB plus makeup.
  */
 
-// Stock crossover frequencies (Vital's). The lowCrossHz/highCrossHz
-// parameters move them, with vitOTTx's range; the split stays sum-flat
-// wherever they sit, because the band sum is AP(f1) * AP(f2) for any pair.
+// Stock crossover frequencies. The lowCrossHz/highCrossHz parameters move
+// them; the split stays sum-flat wherever they sit, because the band sum is
+// AP(f1) * AP(f2) for any pair.
 const DEFAULT_LOW_CROSSOVER_HZ = 120;
 const DEFAULT_HIGH_CROSSOVER_HZ = 2500;
 const MIN_CROSSOVER_HZ = 20;
@@ -73,19 +67,19 @@ const MAX_CROSSOVER_HZ = 18000;
 // and it is also the Q of the allpass their sum produces.
 const BUTTERWORTH_Q = Math.SQRT1_2;
 
-// Vital's per-band envelope base times, scaled by the Attack/Release knobs.
+// Per-band envelope base times, scaled by the Attack/Release knobs.
 const BASE_ATTACK_MS = [2.8, 1.4, 0.7];
 const BASE_RELEASE_MS = [40, 28, 15];
 
-// Vital: attack/release knobs are exponential, exp(8t - 4), so 0.5 is the
-// base time and the ends are 1/55x and 55x.
+// The attack/release knobs are exponential, exp(8t - 4), so 0.5 is the base
+// time and the ends are 1/55x and 55x.
 const KNOB_EXPONENT_SPAN = 8;
 const KNOB_EXPONENT_OFFSET = -4;
 
-// Vital's kMinSampleEnvelope: the envelope never moves faster than this.
+// The envelope never moves faster than this many samples.
 const MIN_ENVELOPE_SAMPLES = 5;
 
-// Vital's kMaxExpandMult: the combined up*down gain is clamped here (+30 dB).
+// The combined up*down gain is clamped here (+30 dB).
 const MAX_EXPAND_MULT = 32;
 
 // OTT's stock thresholds per band, in dBFS. The upper threshold is where
@@ -411,8 +405,8 @@ class OttProcessor extends AudioWorkletProcessor {
         const downward = parameters.downward[0];
         this.updateTiming(parameters.attack[0], parameters.release[0]);
 
-        // Vital: the effective ratio is the per-band ratio times Depth times
-        // the global direction multiplier, clamped to [0, 1], and the
+        // The effective ratio is the per-band ratio times Depth times the
+        // global direction multiplier, clamped to [0, 1], and the
         // power-domain exponent is half that.
         const downExponent = this.downExponent;
         downExponent[0] = 0.5 * Math.min(1, Math.max(0, parameters.lowDown[0] * depth * downward));
