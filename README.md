@@ -152,7 +152,7 @@ The time and frequency sliders are logarithmic, because a linear control across 
 - **No audio at all on one site.** Check the console. ThunderFox logs which elements it skipped and why (`cross-origin`, `drm`), and whether a cross-origin element was reloaded with CORS. If it logs that the page reads as silent, the media is being tainted in a way the pre-check missed — exempt the site.
 - **Some videos on a site are processed and others are not.** The ones left alone are usually served cross-origin from a host that sends no CORS headers; the console says so per element.
 - **Very quiet output.** Raise "Loudness" first, then "In gain" under Advanced.
-- **Distortion.** The limiter applies a gain envelope and nothing else. A little grit on sustained bass is the OTT envelope itself (its ripple is part of the sound; raise "Release" to tame it); anything worse is upstream — back off In gain and Loudness first.
+- **Distortion.** The limiter applies a gain envelope and nothing else. A little grit on sustained bass is the multiband envelope itself (its ripple is part of the sound; raise "Release" to tame it); anything worse is upstream — back off In gain and Loudness first. The applied compressor gain is smoothed over 0.2 ms, which keeps the envelope's supersonic ripple from folding back as inharmonic alias tones on bright content.
 - **Audio and video drift out of sync.** The chain adds about 5.1 ms: the limiter's look-ahead plus 6 samples for the true-peak detector. The multiband stage is IIR and adds none. That is well inside normal lip-sync tolerance.
 
 ## Development notes

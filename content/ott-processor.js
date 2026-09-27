@@ -82,6 +82,16 @@ const MIN_ENVELOPE_SAMPLES = 5;
 // The combined up*down gain is clamped here (+30 dB).
 const MAX_EXPAND_MULT = 32;
 
+// The gain is computed per sample from an envelope that ripples at twice the
+// signal frequency; applying it raw amplitude-modulates the band, and above
+// about 6 kHz the AM sidebands fold back below Nyquist as discrete inharmonic
+// tones (worst measured spur: -65 dBc at 44.1 kHz). A 0.2 ms one-pole on the
+// *applied* gain — decoupled from the detector, so attack/release switching
+// is untouched — attenuates that ripple by 16-25 dB while leaving the
+// transfer curve and the low band's intentional envelope grit (< 0.05 dB
+// effect at 80 Hz) as they were.
+const GAIN_SMOOTHING_SECONDS = 0.0002;
+
 // OTT's stock thresholds per band, in dBFS. The upper threshold is where
 // downward compression begins; the lower is where upward compression begins.
 const UPPER_THRESHOLD_DB = [-28, -25, -30];
@@ -245,6 +255,10 @@ class OttProcessor extends AudioWorkletProcessor {
         this.envHigh = new Float64Array(0);
         this.envLow = new Float64Array(0);
 
+        // The applied-gain smoother's state, same indexing. Gain domain.
+        this.smoothedGain = new Float64Array(0);
+        this.gainSmoothingCoefficient = 0;
+
         // The floor fade's slow envelope, per band, linked across channels.
         this.floorEnvelope = new Float64Array(BAND_COUNT);
         this.floorAttackCoefficient = 0;
@@ -294,6 +308,7 @@ class OttProcessor extends AudioWorkletProcessor {
         this.lastRelease = -1;
         this.floorAttackCoefficient = Math.exp(-1 / (FLOOR_ATTACK_SECONDS * sampleRate));
         this.floorReleaseCoefficient = Math.exp(-1 / (FLOOR_RELEASE_SECONDS * sampleRate));
+        this.gainSmoothingCoefficient = Math.exp(-1 / (GAIN_SMOOTHING_SECONDS * sampleRate));
         const lowHz = this.lowCrossoverHz;
         const highHz = this.highCrossoverHz;
         this.lowSplitLp.forEach((section) => section.setLowpass(lowHz, BUTTERWORTH_Q, sampleRate));
@@ -315,6 +330,7 @@ class OttProcessor extends AudioWorkletProcessor {
         }
         this.floorEnvelope.fill(0);
         this.bandGain.fill(1);
+        this.smoothedGain.fill(1);
     }
 
     ensureChannels(count) {
@@ -329,6 +345,7 @@ class OttProcessor extends AudioWorkletProcessor {
         this.scratchHigh = new Float64Array(count);
         this.envHigh = new Float64Array(BAND_COUNT * count);
         this.envLow = new Float64Array(BAND_COUNT * count);
+        this.smoothedGain = new Float64Array(BAND_COUNT * count);
         this.reset();
     }
 
@@ -441,6 +458,8 @@ class OttProcessor extends AudioWorkletProcessor {
         const scratchMid = this.scratchMid;
         const scratchHigh = this.scratchHigh;
         const bandGain = this.bandGain;
+        const smoothedGain = this.smoothedGain;
+        const gainSmoothing = this.gainSmoothingCoefficient;
         const dry = 1 - mix;
 
         const lowLpA = this.lowSplitLp[0];
@@ -547,6 +566,13 @@ class OttProcessor extends AudioWorkletProcessor {
                     }
 
                     if (gain > MAX_EXPAND_MULT) gain = MAX_EXPAND_MULT;
+
+                    // Smooth the applied gain (see GAIN_SMOOTHING_SECONDS):
+                    // the detector above stays raw so its attack/release
+                    // switching is unchanged; only the multiplier the band is
+                    // ridden by loses its supersonic ripple.
+                    gain = smoothedGain[base + c] =
+                        gainSmoothing * smoothedGain[base + c] + (1 - gainSmoothing) * gain;
 
                     if (c === 0) bandGain[b] = gain * outMult;
 

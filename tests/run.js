@@ -264,9 +264,10 @@ console.log('\n== OTT ==');
 
 {
     // A kick and bass pattern, low band gain read every sample. The detector
-    // envelope takes multiplicative steps, so a kick onset moves the gain by
-    // a few dB per sample at the start of the attack — that snap is the OTT
-    // attack. What must not happen is an unbounded step or a non-finite gain.
+    // envelope takes multiplicative steps and the applied gain follows it
+    // through a 0.2 ms smoother, so a kick onset moves the gain by a fraction
+    // of a dB per sample at the start of the attack. What must not happen is
+    // an unbounded step or a non-finite gain.
     const input = S.kickBass(3, RATE);
     [{ depth: 0.5 }, { depth: 1 }].forEach((cfg) => {
         const gain = new Float32Array(input.length);
