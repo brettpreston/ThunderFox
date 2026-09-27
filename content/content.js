@@ -754,6 +754,7 @@
         const base = Object.assign({}, settings);
         S.ADVANCED_KEYS.forEach((key) => { base[key] = S.DEFAULTS[key]; });
         base.limiterIsp = S.DEFAULTS.limiterIsp;
+        base.ottLinearPhase = S.DEFAULTS.ottLinearPhase;
         return base;
     }
 
@@ -796,6 +797,7 @@
             highUp: advanced.ottHighUp,
             highDown: advanced.ottHighDown,
             highGainDb: advanced.ottHighGainDb,
+            linearPhase: advanced.ottLinearPhase ? 1 : 0,
             ceiling: dbToGain(advanced.limiterCeilingDb),
             smoothing: msToSeconds(advanced.limiterAttackMs),
             limiterRelease: msToSeconds(advanced.limiterReleaseMs),
@@ -815,6 +817,9 @@
             'highUp', 'highDown', 'highGainDb'].forEach((key) => {
             if (changed(key)) rampParam(ott.get(key), targets[key]);
         });
+        // Structural: toggling rebuilds the band splitter inside the worklet,
+        // so it must step between 0 and 1, never ramp through fractions.
+        if (changed('linearPhase')) setParam(ott.get('linearPhase'), targets.linearPhase);
 
         const limiter = STATE.limiter.parameters;
         if (changed('ceiling')) rampParam(limiter.get('ceiling'), targets.ceiling);
@@ -865,7 +870,7 @@
 
         const advancedPatch = {};
         let hasAdvanced = false;
-        S.ADVANCED_KEYS.concat(['limiterIsp']).forEach((key) => {
+        S.ADVANCED_KEYS.concat(['limiterIsp', 'ottLinearPhase']).forEach((key) => {
             if (patch[key] !== undefined) {
                 advancedPatch[key] = patch[key];
                 hasAdvanced = true;

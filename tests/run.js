@@ -384,6 +384,99 @@ const ott441 = loadProcessor('content/ott-processor.js', 44100);
         `worst notch ${fmt(notch, 2)} dB`);
 }
 
+/* ------------------------------------------------------- OTT: linear phase */
+
+console.log('\n== OTT: linear phase ==');
+
+{
+    // In linear-phase mode the two FIR splits are complementary by
+    // construction, so at depth 0 the three bands must sum to a PURE delay:
+    // one sample where the latency says, nothing anywhere else.
+    [{ label: 'stock crossovers', params: {} },
+        { label: 'crossovers 250/6000', params: { lowCrossHz: 250, highCrossHz: 6000 } }]
+        .forEach(({ label, params }) => {
+            const processor = ott.create();
+            const input = S.impulse(0.5, RATE, 0.9, 0.1);
+            const out = ott.run(processor, S.stereo(input),
+                Object.assign({ depth: 0, linearPhase: 1 }, params))[0];
+            const expected = Math.round(0.1 * RATE) + processor.firLatencySamples;
+            let argmax = 0;
+            let residual = 0;
+            for (let i = 0; i < out.length; i++) {
+                if (Math.abs(out[i]) > Math.abs(out[argmax])) argmax = i;
+                if (i !== expected && Math.abs(out[i]) > residual) residual = Math.abs(out[i]);
+            }
+            check(`linear phase, depth 0: impulse is a pure delay (${label})`,
+                argmax === expected
+                    && Math.abs(out[expected] - 0.9) < 1e-3
+                    && residual < 0.9 * S.dbToGain(-80)
+                    && !S.hasNonFinite(out),
+                `peak at ${argmax} (expected ${expected}), residual ${fmt(S.gainToDb(residual / 0.9), 1)} dB`);
+        });
+}
+
+{
+    // Tap counts follow the crossovers: 1023 taps at 120 Hz (capped), 63 at
+    // 5 kHz, so the splitter's latency at the stock split is 511 + 31.
+    const processor = ott.create();
+    ott.run(processor, S.stereo(S.silence(0.05, RATE)), { linearPhase: 1 });
+    check('linear phase: latency at the stock crossovers is 542 samples',
+        processor.firLatencySamples === 542,
+        `${processor.firLatencySamples} samples (${fmt((processor.firLatencySamples / RATE) * 1000, 1)} ms)`);
+}
+
+{
+    // Depth 0 flatness on tones — tighter than the IIR bound, because the
+    // sum is a pure delay rather than an allpass pair.
+    [40, 120, 300, 1000, 5000, 8000].forEach((frequency) => {
+        const input = S.tone(frequency, 1, RATE, S.dbToGain(-12));
+        const out = ott.run(ott.create(), S.stereo(input), { depth: 0, linearPhase: 1 })[0];
+        const error = S.gainToDb(S.rms(out, RATE / 2) / S.rms(input, RATE / 2));
+        check(`linear phase, depth 0 is flat at ${frequency} Hz`, Math.abs(error) < 0.05 && !S.hasNonFinite(out),
+            `${fmt(error, 3)} dB`);
+    });
+}
+
+{
+    // The compressor behind the FIR split: same transfer-curve expectations
+    // as the IIR-mode test, and the band routing must still follow the
+    // crossover parameters.
+    const quiet = S.tone(1000, 2, RATE, S.dbToGain(-50));
+    const loud = S.tone(1000, 2, RATE, S.dbToGain(-6));
+    const quietOut = ott.run(ott.create(), S.stereo(quiet), { depth: 1, linearPhase: 1 })[0];
+    const loudOut = ott.run(ott.create(), S.stereo(loud), { depth: 1, linearPhase: 1 })[0];
+    const quietGain = S.gainToDb(S.rms(quietOut, RATE) / S.rms(quiet, RATE));
+    const loudGain = S.gainToDb(S.rms(loudOut, RATE) / S.rms(loud, RATE));
+    check('linear phase: upward compression lifts a -50 dB tone above its makeup', quietGain > 13,
+        `${fmt(quietGain, 1)} dB (makeup alone is 11.7)`);
+    check('linear phase: the -50..-6 dB range is compressed', 44 + loudGain - quietGain < 44 - 8,
+        `44 dB in -> ${fmt(44 + loudGain - quietGain, 1)} dB out`);
+
+    const bandLevels = (params) => {
+        const processor = ott.create();
+        ott.run(processor, S.stereo(S.tone(300, 1, RATE, S.dbToGain(-12))), params);
+        return Array.from(processor.floorEnvelope);
+    };
+    const stock = bandLevels({ depth: 1, linearPhase: 1 });
+    const moved = bandLevels({ depth: 1, linearPhase: 1, lowCrossHz: 600 });
+    check('linear phase: 300 Hz lands in the mid band at the stock crossover', stock[1] > stock[0] * 10,
+        `low ${fmt(10 * Math.log10(stock[0] + 1e-20), 1)} dB vs mid ${fmt(10 * Math.log10(stock[1] + 1e-20), 1)} dB`);
+    check('linear phase: raising the low crossover moves 300 Hz into the low band', moved[0] > moved[1] * 10,
+        `low ${fmt(10 * Math.log10(moved[0] + 1e-20), 1)} dB vs mid ${fmt(10 * Math.log10(moved[1] + 1e-20), 1)} dB`);
+}
+
+{
+    // The alias-spur bound holds in FIR mode too: the fix is in the gain
+    // application, not in the splitter.
+    const rate = 44100;
+    const input = S.tone(10000, 1.5, rate, S.dbToGain(-12));
+    const out = ott441.run(ott441.create(), S.stereo(input), { depth: 1, linearPhase: 1 })[0];
+    const spur = S.worstSpurDb(out, 10000, rate, Math.round(0.4 * rate), Math.round(1.4 * rate));
+    check('linear phase: worst alias spur at 10 kHz / 44.1 kHz under -78 dBc',
+        spur.db <= -78 && !S.hasNonFinite(out),
+        `${fmt(spur.db, 1)} dBc at ${Math.round(spur.hz)} Hz`);
+}
+
 {
     // Silence must stay silent: the upward stage and the positive band gain
     // fade out below the floor rather than lifting the noise floor by the

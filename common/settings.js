@@ -68,6 +68,11 @@ var ThunderFoxSettings = (function() {
         ottHighDown: 1,
         ottHighGainDb: 16.3,
 
+        // Linear-phase band split: complementary FIR pairs instead of the IIR
+        // tree. Costs latency (~11 ms at the stock crossovers) and CPU, so it
+        // is opt-in.
+        ottLinearPhase: false,
+
         limiterAttackMs: 2.5,
         limiterReleaseMs: 80,
         limiterHoldMs: 20,
@@ -207,6 +212,9 @@ var ThunderFoxSettings = (function() {
         result.limiterIsp = source && typeof source.limiterIsp === 'boolean'
             ? source.limiterIsp
             : DEFAULTS.limiterIsp;
+        result.ottLinearPhase = source && typeof source.ottLinearPhase === 'boolean'
+            ? source.ottLinearPhase
+            : DEFAULTS.ottLinearPhase;
         return result;
     }
 

@@ -198,6 +198,152 @@ class Biquad {
     }
 }
 
+/* --------------------------------------------------------- linear phase */
+
+// The optional linear-phase band split: complementary FIR pairs instead of
+// the IIR tree. The lowpass is a Hamming-windowed sinc; the highpass is
+// never designed — it is the delayed input minus the lowpass, so each split
+// is complementary by construction and the three bands sum to a PURE DELAY:
+// exactly flat magnitude and exactly linear phase. With Dn = (taps_n - 1)/2:
+//
+//   stage1 (f1): lowWide = L1 * x       rest = x[n - D1] - lowWide
+//   stage2 (f2): mid     = L2 * rest    high = rest[n - D2] - mid
+//   low = lowWide delayed by D2
+//   low + mid + high === x[n - D1 - D2]
+//
+// The cost is latency (D1 + D2 samples; 542 = ~11.3 ms at the stock
+// crossovers at 48 kHz) and CPU: direct convolution is taps1 + taps2
+// multiply-adds per sample per channel, ~104M madd/s for stereo 48 kHz at
+// the stock 120 Hz / 5 kHz split and ~200M worst case with both crossovers
+// low. That is why the mode is opt-in and default-off.
+const FIR_TAP_STEPS = [63, 127, 255, 511, 1023];
+
+// A Hamming window's transition band is about 3.3 * rate / taps wide, so
+// 5.5 * rate / frequency keeps the transition within roughly +/-0.65 octave
+// of the crossover. The cap bounds CPU and latency; below ~260 Hz the FIR
+// edge is honestly looser than the IIR tree's. Quantised steps mean dragging
+// a crossover only rebuilds the kernel at ~octave boundaries.
+function firTapCount(frequency, rate) {
+    const wanted = (5.5 * rate) / frequency;
+    for (let i = 0; i < FIR_TAP_STEPS.length; i++) {
+        if (FIR_TAP_STEPS[i] >= wanted) return FIR_TAP_STEPS[i];
+    }
+    return FIR_TAP_STEPS[FIR_TAP_STEPS.length - 1];
+}
+
+// Odd-length Hamming-windowed sinc lowpass, normalised so the coefficient
+// sum is exactly 1 (0 dB at DC).
+function designLowpassFir(frequency, taps, rate) {
+    const kernel = new Float64Array(taps);
+    const centre = (taps - 1) / 2;
+    const normalized = Math.min(frequency / rate, 0.4999);
+    let sum = 0;
+    for (let i = 0; i < taps; i++) {
+        const n = i - centre;
+        const sinc = n === 0
+            ? 2 * normalized
+            : Math.sin(2 * Math.PI * normalized * n) / (Math.PI * n);
+        const window = 0.54 - 0.46 * Math.cos((2 * Math.PI * i) / (taps - 1));
+        kernel[i] = sinc * window;
+        sum += kernel[i];
+    }
+    for (let i = 0; i < taps; i++) kernel[i] /= sum;
+    return kernel;
+}
+
+/**
+ * One FIR split. process() returns the lowpass of the input; delayed()
+ * returns the input `centre` samples back, read from the same ring buffer,
+ * so the highpass complement (delayed - lowpass) costs one subtraction.
+ * All channels share one write position; advance() moves it once per frame,
+ * after every channel has been processed.
+ */
+class FirSplitStage {
+    constructor(frequency, rate) {
+        this.taps = firTapCount(frequency, rate);
+        this.centre = (this.taps - 1) / 2;
+        this.kernel = designLowpassFir(frequency, this.taps, rate);
+        this.history = new Float64Array(0);
+        this.writeIndex = 0;
+        this.channelCount = 0;
+    }
+
+    setChannelCount(count) {
+        if (this.channelCount === count) return;
+        this.channelCount = count;
+        this.history = new Float64Array(this.taps * count);
+        this.writeIndex = 0;
+    }
+
+    reset() {
+        this.history.fill(0);
+        this.writeIndex = 0;
+    }
+
+    process(x, channel) {
+        const taps = this.taps;
+        const kernel = this.kernel;
+        const history = this.history;
+        const base = channel * taps;
+        const write = this.writeIndex;
+        history[base + write] = x;
+        // Dot product as two linear loops split at the write index: kernel[k]
+        // multiplies the sample k frames back, no per-tap modulo.
+        let acc = 0;
+        let k = 0;
+        for (let i = base + write; i >= base; i--, k++) acc += kernel[k] * history[i];
+        for (let i = base + taps - 1; k < taps; i--, k++) acc += kernel[k] * history[i];
+        return acc;
+    }
+
+    delayed(channel) {
+        let index = this.writeIndex - this.centre;
+        if (index < 0) index += this.taps;
+        return this.history[channel * this.taps + index];
+    }
+
+    advance() {
+        this.writeIndex = this.writeIndex + 1 === this.taps ? 0 : this.writeIndex + 1;
+    }
+}
+
+// A plain delay, for holding the low band while the second split's FIR
+// catches the other two up. Same shared-write-position contract as
+// FirSplitStage: process() every channel, then advance() once.
+class DelayLine {
+    constructor(delaySamples) {
+        this.delay = delaySamples;
+        this.size = delaySamples + 1;
+        this.buffer = new Float64Array(0);
+        this.writeIndex = 0;
+        this.channelCount = 0;
+    }
+
+    setChannelCount(count) {
+        if (this.channelCount === count) return;
+        this.channelCount = count;
+        this.buffer = new Float64Array(this.size * count);
+        this.writeIndex = 0;
+    }
+
+    reset() {
+        this.buffer.fill(0);
+        this.writeIndex = 0;
+    }
+
+    process(x, channel) {
+        const base = channel * this.size;
+        this.buffer[base + this.writeIndex] = x;
+        let read = this.writeIndex - this.delay;
+        if (read < 0) read += this.size;
+        return this.buffer[base + read];
+    }
+
+    advance() {
+        this.writeIndex = this.writeIndex + 1 === this.size ? 0 : this.writeIndex + 1;
+    }
+}
+
 class OttProcessor extends AudioWorkletProcessor {
     static get parameterDescriptors() {
         // Input and output trims are GainNodes in the host graph (pre-boost
@@ -210,7 +356,10 @@ class OttProcessor extends AudioWorkletProcessor {
             { name: 'upward', defaultValue: 1, minValue: 0, maxValue: 2, automationRate: 'k-rate' },
             { name: 'downward', defaultValue: 1, minValue: 0, maxValue: 2, automationRate: 'k-rate' },
             { name: 'lowCrossHz', defaultValue: DEFAULT_LOW_CROSSOVER_HZ, minValue: MIN_CROSSOVER_HZ, maxValue: MAX_CROSSOVER_HZ, automationRate: 'k-rate' },
-            { name: 'highCrossHz', defaultValue: DEFAULT_HIGH_CROSSOVER_HZ, minValue: MIN_CROSSOVER_HZ, maxValue: MAX_CROSSOVER_HZ, automationRate: 'k-rate' }
+            { name: 'highCrossHz', defaultValue: DEFAULT_HIGH_CROSSOVER_HZ, minValue: MIN_CROSSOVER_HZ, maxValue: MAX_CROSSOVER_HZ, automationRate: 'k-rate' },
+            // Structural 0/1 switch (worklet parameters are floats); the host
+            // steps it, never ramps it. See the linear-phase section above.
+            { name: 'linearPhase', defaultValue: 0, minValue: 0, maxValue: 1, automationRate: 'k-rate' }
         ];
 
         // Per band: Up is the upward (lower-threshold) ratio, Down the
@@ -268,6 +417,14 @@ class OttProcessor extends AudioWorkletProcessor {
         // audio path, which keeps per-channel gains in scratch.
         this.bandGain = new Float64Array(BAND_COUNT).fill(1);
 
+        // The linear-phase splitter is only built when the mode is switched
+        // on; until then it costs nothing.
+        this.linearPhase = false;
+        this.firStage1 = null;
+        this.firStage2 = null;
+        this.lowDelay = null;
+        this.firLatencySamples = 0;
+
         this.lowCrossoverHz = DEFAULT_LOW_CROSSOVER_HZ;
         this.highCrossoverHz = DEFAULT_HIGH_CROSSOVER_HZ;
         this.designCrossover();
@@ -316,10 +473,33 @@ class OttProcessor extends AudioWorkletProcessor {
         this.highSplitLp.forEach((section) => section.setLowpass(highHz, BUTTERWORTH_Q, sampleRate));
         this.highSplitHp.forEach((section) => section.setHighpass(highHz, BUTTERWORTH_Q, sampleRate));
         this.lowAllpass.setAllpass(highHz, BUTTERWORTH_Q, sampleRate);
+        if (this.linearPhase) this.designFir();
+    }
+
+    // (Re)build the FIR splitter for the current crossovers. A rebuild
+    // changes tap counts and therefore latency, so a crossover drag in
+    // linear-phase mode can click at a tap-count boundary; a crossfade
+    // between two full splitters would double the CPU, which is not worth a
+    // transient on a control that is rarely moved.
+    designFir() {
+        this.firStage1 = new FirSplitStage(this.lowCrossoverHz, sampleRate);
+        this.firStage2 = new FirSplitStage(this.highCrossoverHz, sampleRate);
+        this.lowDelay = new DelayLine(this.firStage2.centre);
+        this.firLatencySamples = this.firStage1.centre + this.firStage2.centre;
+        if (this.channelCount > 0) {
+            this.firStage1.setChannelCount(this.channelCount);
+            this.firStage2.setChannelCount(this.channelCount);
+            this.lowDelay.setChannelCount(this.channelCount);
+        }
     }
 
     reset() {
         this.sections.forEach((section) => section.reset());
+        if (this.firStage1) {
+            this.firStage1.reset();
+            this.firStage2.reset();
+            this.lowDelay.reset();
+        }
         // The downward envelope idles at its threshold clamp, the upward one
         // at zero; both are where a long silence would leave them.
         for (let b = 0; b < BAND_COUNT; b++) {
@@ -343,6 +523,11 @@ class OttProcessor extends AudioWorkletProcessor {
         this.scratchLow = new Float64Array(count);
         this.scratchMid = new Float64Array(count);
         this.scratchHigh = new Float64Array(count);
+        if (this.firStage1) {
+            this.firStage1.setChannelCount(count);
+            this.firStage2.setChannelCount(count);
+            this.lowDelay.setChannelCount(count);
+        }
         this.envHigh = new Float64Array(BAND_COUNT * count);
         this.envLow = new Float64Array(BAND_COUNT * count);
         this.smoothedGain = new Float64Array(BAND_COUNT * count);
@@ -402,6 +587,16 @@ class OttProcessor extends AudioWorkletProcessor {
             for (let c = 0; c < channelCount; c++) output[c].fill(0);
             this.reset();
             return true;
+        }
+
+        // Structural mode switch. Both splitters start clean on a toggle:
+        // entering builds the FIR stages, and leaving must not replay the IIR
+        // tree's stale state from before the mode switch.
+        const wantLinearPhase = parameters.linearPhase[0] >= 0.5;
+        if (wantLinearPhase !== this.linearPhase) {
+            this.linearPhase = wantLinearPhase;
+            if (wantLinearPhase) this.designFir();
+            this.reset();
         }
 
         // Crossover moves retune the coefficients in place, keeping the filter
@@ -472,6 +667,11 @@ class OttProcessor extends AudioWorkletProcessor {
         const highHpB = this.highSplitHp[1];
         const allpass = this.lowAllpass;
 
+        const linearPhase = this.linearPhase;
+        const firStage1 = this.firStage1;
+        const firStage2 = this.firStage2;
+        const lowDelay = this.lowDelay;
+
         // Hoisted out of the frame loop: which input channels actually exist.
         const sourceChannels = Math.min(input.length, channelCount);
 
@@ -488,12 +688,23 @@ class OttProcessor extends AudioWorkletProcessor {
                 // A single NaN would poison every filter's state permanently.
                 if (!(x === x)) x = 0;
 
-                const lowMid = lowLpB.process(lowLpA.process(x, c), c);
-                const upper = lowHpB.process(lowHpA.process(x, c), c);
+                let low;
+                let mid;
+                let high;
+                if (linearPhase) {
+                    const lowWide = firStage1.process(x, c);
+                    const rest = firStage1.delayed(c) - lowWide;
+                    mid = firStage2.process(rest, c);
+                    high = firStage2.delayed(c) - mid;
+                    low = lowDelay.process(lowWide, c);
+                } else {
+                    const lowMid = lowLpB.process(lowLpA.process(x, c), c);
+                    const upper = lowHpB.process(lowHpA.process(x, c), c);
 
-                const low = allpass.process(lowMid, c);
-                const mid = highLpB.process(highLpA.process(upper, c), c);
-                const high = highHpB.process(highHpA.process(upper, c), c);
+                    low = allpass.process(lowMid, c);
+                    mid = highLpB.process(highLpA.process(upper, c), c);
+                    high = highHpB.process(highHpA.process(upper, c), c);
+                }
 
                 scratchLow[c] = low;
                 scratchMid[c] = mid;
@@ -505,6 +716,12 @@ class OttProcessor extends AudioWorkletProcessor {
                 if (lowPower > lowPeak) lowPeak = lowPower;
                 if (midPower > midPeak) midPeak = midPower;
                 if (highPower > highPeak) highPeak = highPower;
+            }
+
+            if (linearPhase) {
+                firStage1.advance();
+                firStage2.advance();
+                lowDelay.advance();
             }
 
             for (let c = 0; c < channelCount; c++) output[c][i] = 0;

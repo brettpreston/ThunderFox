@@ -38,7 +38,8 @@ const ADVANCED_LAYOUT = [
     {
         group: 'Crossover', rows: [
             { key: 'ottLowCrossHz', label: 'Low / Mid' },
-            { key: 'ottHighCrossHz', label: 'Mid / High' }
+            { key: 'ottHighCrossHz', label: 'Mid / High' },
+            { key: 'ottLinearPhase', label: 'Lin. phase', type: 'checkbox' }
         ]
     },
     {
@@ -266,6 +267,25 @@ function buildAdvanced() {
         advancedBody.appendChild(heading);
 
         section.rows.forEach((row) => {
+            if (row.type === 'checkbox') {
+                const checkboxRow = document.createElement('div');
+                checkboxRow.className = 'row adv-row';
+                const checkboxLabel = document.createElement('label');
+                checkboxLabel.textContent = row.label;
+                checkboxLabel.htmlFor = `adv-${row.key}`;
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.id = `adv-${row.key}`;
+                checkboxRow.append(checkboxLabel, checkbox);
+                advancedBody.appendChild(checkboxRow);
+
+                advancedControls[row.key] = { input: checkbox };
+                checkbox.addEventListener('change', () => {
+                    commit({ [row.key]: checkbox.checked });
+                });
+                return;
+            }
+
             const range = S.LIMITS[row.key];
 
             const wrapper = document.createElement('div');
@@ -486,6 +506,7 @@ advancedResetBtn.addEventListener('click', () => {
     const patch = {};
     S.ADVANCED_KEYS.forEach((key) => { patch[key] = S.DEFAULTS[key]; });
     patch.limiterIsp = S.DEFAULTS.limiterIsp;
+    patch.ottLinearPhase = S.DEFAULTS.ottLinearPhase;
     Object.assign(settings, patch);
     renderAdvanced();
     commit(patch);
