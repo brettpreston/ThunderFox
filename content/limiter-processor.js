@@ -1,32 +1,72 @@
 'use strict';
 
 /**
- * Look-ahead brickwall limiter.
+ * Look-ahead brickwall limiter with a program-dependent release.
  *
  * The signal is delayed while the gain envelope is computed from samples that
  * have not been heard yet, so the gain is already down by the time a peak
- * arrives. That is what makes it transparent: there is no clipping, no
- * saturation and no waveshaping, only a smooth gain envelope.
+ * arrives. There is no clipping, no saturation and no waveshaping, only a
+ * smooth gain envelope.
  *
- * The envelope is built in three steps:
+ * Everything between the detector and the output works on the gain reduction
+ * in the log domain (nepers, positive = quieter), because that is the scale
+ * loudness is heard on. A release that is exponential in linear gain gives
+ * back 20 dB of a 24 dB reduction in its first time constant, which is heard
+ * as a swell; the same release in decibels is heard as a fade.
  *
- *   r[n] = min(1, ceiling / |x[n]|)          required gain, per sample
- *   m[k] = min(r[k .. k + D - 1])            running minimum over the window
- *   s[k] = mean(m[k - L + 1 .. k])           boxcar, turns the staircase into a ramp
+ * The envelope is built in four steps:
  *
- * with D the look-ahead in samples and L <= D the smoothing width. Output is
- * y[k] = g[k] * x[k], where g[k] = min(s[k], recovery).
+ *   r[n] = max(0, ln(|x[n]| / ceiling))      required reduction, per sample
+ *   m[k] = max(r[k .. k + D - 1])            running maximum over the window
+ *   e[k] = release(m)[k],  e[k] >= m[k]      hold and two-stage release
+ *   g[k] = (w * e)[k]                        smoothing, kernel w of support <= D
  *
- * This guarantees |y| <= ceiling. For any peak at index p, every m[j] averaged
- * into s[p] is taken over a window [j, j + D - 1] that contains p, because j
- * ranges over [p - L + 1, p] and L <= D. Each of those minima is therefore at
- * most r[p], so their mean is too, and g[p] <= s[p] <= r[p]. Taking a minimum
- * with the recovery term can only lower the gain further, so the release
- * envelope cannot break the bound either.
+ * with D the look-ahead in samples. Output is y[k] = exp(-g[k]) * x[k].
+ *
+ * This guarantees |y| <= ceiling. The kernel w is non-negative, sums to one
+ * and spans at most D samples, so g[p] is a weighted mean of e[j] for j in
+ * [p - D + 1, p]. Each e[j] >= m[j], and each m[j] is a maximum over a window
+ * [j, j + D - 1] that contains p, so every term is at least r[p] and their
+ * mean is too. The release stage sits *inside* that bound: whatever it does,
+ * it may only ever hold the envelope at or above the running maximum.
+ *
+ * Smoothing comes last, so it rounds off every corner the envelope has, the
+ * start of a release as much as the start of an attack. The kernel is two
+ * boxcars in cascade (a triangle), which turns a step into an S-curve with a
+ * continuous slope.
  *
  * |x[n]| is the inter-sample peak, not the sample magnitude, when ISP is on:
  * a signal can pass between two samples and still reconstruct above the ceiling
  * in any downstream resampler or codec. See the ISP section below.
+ *
+ * The release. A single fast release is what makes a hard-driven limiter pump:
+ * after every peak the gain races back up, the sustained material swells with
+ * it, and the next peak pushes it down again. A single slow release avoids
+ * that but lets one stray click duck everything after it. So the reduction is
+ * kept in two parts, e = fast + slow:
+ *
+ *   - a new peak is taken up by the fast part, which recovers exponentially,
+ *     inside the time the transient itself masks;
+ *   - reduction the programme keeps asking for moves across to the slow part,
+ *     which recovers along a straight line in decibels, a few dB per second.
+ *
+ * How readily it moves depends on how long the programme has been over the
+ * ceiling. A lone transient is gone before anything has moved, so all of it
+ * comes back fast. Sustained or dense material moves nearly all of its
+ * reduction across, and from then on the gain rides the programme's level
+ * rather than its individual peaks. The harder and longer the limiter is
+ * driven, the more of the reduction sits in the slow part and the longer the
+ * effective release. The hand-over is a transfer between two continuous
+ * quantities whose sum it leaves unchanged, not a switch between two release
+ * rates, so there is no stage change to hear.
+ *
+ * The drive. The gain ahead of the limiter is applied here rather than by a
+ * node in front of it, because then the limiter knows when it changes.
+ * Reduction that was only there because of the drive is handed back as the
+ * drive comes down, in step with it. Left to the slow release it would take
+ * seconds, and turning the drive down would be heard as the level dropping
+ * away and creeping back. A rising drive needs nothing special: the
+ * look-ahead meets it like any other rise in level.
  */
 
 // Fixed, so the node's latency never changes while audio is running. Changing
@@ -42,24 +82,47 @@ const ISP_PHASES = 4;
 const ISP_CENTRE = ISP_TAPS / 2 - 1;
 const ISP_LATENCY = ISP_TAPS - 1 - ISP_CENTRE;
 
-// The release parameter is the time to recover 99% of the gain reduction rather
-// than one time constant, so the number on the control matches what is heard.
-// ln(100) time constants gets there. Recovery is a single exponential toward
-// unity, rather than the staged fast-then-slow recovery an earlier version
-// used, whose stage switch was audible as a kink in the release.
-const RECOVERY_DECADES = Math.log(100);
+// The release parameter is the time the fast part takes to give back 90% of
+// its reduction, in decibels, rather than one time constant, so the number on
+// the control is close to what is heard after a transient.
+const RELEASE_DECADES = Math.log(10);
 
-// Below this the release one-pole is denormal and costs a hardware penalty for
-// no audible benefit.
-const GAIN_SETTLED = 1e-12;
+// The slow part, in units of the fast part's time constant, so the single
+// Release control scales the whole recovery. CHARGE_RATIO is the time constant
+// on which sustained reduction moves from the fast part to the slow part.
+// RELEASE_SLOPE is how far the slow part recovers, in nepers, per fast time
+// constant. At the default release of 80 ms these come to 26 ms and 3 dB per
+// second.
+const SLOW_CHARGE_RATIO = 0.75;
+const SLOW_RELEASE_SLOPE = 0.012;
 
-// Rebuilding the boxcar sum periodically bounds the random walk that a running
-// add/subtract accumulator over Float32 stores would otherwise accrue.
+// Headroom added to the required reduction, about 0.00001 dB, so rounding in
+// the running sums and in the Float32 output cannot land above the ceiling.
+const GUARD = 1e-6;
+
+// Below this a one-pole is heading for denormals, which cost a hardware
+// penalty for no audible benefit.
+const REDUCTION_SETTLED = 1e-9;
+
+// A peak that asks for the reduction already in place restarts the hold. The
+// envelope is a sum of two parts that trade reduction every sample, so "the
+// same" has to allow for rounding.
+const HOLD_TOLERANCE = 1e-9;
+
+// Rebuilding the boxcar sums periodically bounds the random walk that a
+// running add/subtract accumulator would otherwise accrue.
 const BOX_RESUM_INTERVAL = 1 << 16;
 
 class BrickwallLimiterProcessor extends AudioWorkletProcessor {
     static get parameterDescriptors() {
         return [
+            {
+                name: 'drive',
+                defaultValue: 1,
+                minValue: 0.001,
+                maxValue: 100,
+                automationRate: 'a-rate'
+            },
             {
                 name: 'ceiling',
                 defaultValue: 0.966,
@@ -69,7 +132,7 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
             },
             {
                 name: 'smoothing',
-                defaultValue: 0.0025,
+                defaultValue: LOOKAHEAD_SECONDS,
                 minValue: 0.0002,
                 maxValue: LOOKAHEAD_SECONDS,
                 automationRate: 'k-rate'
@@ -102,33 +165,56 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
         super();
 
         this.lookahead = Math.max(2, Math.round(LOOKAHEAD_SECONDS * sampleRate));
+        this.latency = this.lookahead - 1 + ISP_LATENCY;
 
         this.delay = [];
         this.delayPos = 0;
 
-        // Monotonic deque over the required gain, so the running minimum costs
-        // amortised O(1) per sample instead of O(lookahead). Indices are
+        // The drive each sample went in at, as a logarithm, kept until that
+        // sample comes out. The first block sets the starting value, so a
+        // drive that was already up when the stream began is not mistaken
+        // for a change.
+        this.driveRing = new Float64Array(this.latency + 1);
+        this.drivePos = 0;
+        this.drive = 1;
+        this.driveLog = 0;
+        this.delayedDriveLog = 0;
+        this.driveKnown = false;
+
+        // Monotonic deque over the required reduction, so the running maximum
+        // costs amortised O(1) per sample instead of O(lookahead). Indices are
         // doubles rather than Int32, which would wrap after about twelve hours
         // of continuous playback and corrupt the window comparison.
         const dequeCapacity = this.lookahead + 1;
-        this.dequeValues = new Float32Array(dequeCapacity);
+        this.dequeValues = new Float64Array(dequeCapacity);
         this.dequeIndices = new Float64Array(dequeCapacity);
         this.dequeHead = 0;
         this.dequeCount = 0;
 
-        // Ring of minima feeding the boxcar average. Unity is "no reduction",
-        // so unwritten entries must start there rather than at zero.
-        this.minima = new Float32Array(this.lookahead + 1).fill(1);
-        this.minimaIndex = -1;
-        this.minimaWrite = 0;
-        this.boxSum = 0;
-        this.boxCount = 0;
+        // The two boxcars of the smoothing kernel, each with the ring of its
+        // own recent inputs. Zero is "no reduction", so a fresh ring is
+        // already the right history for a stream that has not started. Each
+        // boxcar is at most half the look-ahead, which keeps the pair inside
+        // the bound in the header even across a change of length, when the
+        // second ring still holds averages taken at the old one.
+        this.boxCapacity = Math.max(1, Math.floor((this.lookahead + 1) / 2));
+        this.envelopeRing = new Float64Array(this.boxCapacity);
+        this.averageRing = new Float64Array(this.boxCapacity);
+        this.ringPos = 0;
         this.boxLength = 0;
+        this.envelopeSum = 0;
+        this.averageSum = 0;
         this.resumCountdown = BOX_RESUM_INTERVAL;
 
-        this.gain = 1;
-        this.sampleIndex = 0;
+        this.fast = 0;
+        this.slow = 0;
+        this.sustain = 0;
         this.holdCountdown = 0;
+        this.sampleIndex = 0;
+
+        // The inter-sample peak found between the previous sample and this
+        // one. It counts against both of its neighbours.
+        this.previousBetween = 0;
 
         // Doubled ring, so a tap loop can read ISP_TAPS consecutive samples
         // without a modulo on every tap.
@@ -143,8 +229,8 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
 
         this.port.postMessage({
             type: 'latency',
-            samples: this.lookahead - 1 + ISP_LATENCY,
-            seconds: (this.lookahead - 1 + ISP_LATENCY) / sampleRate
+            samples: this.latency,
+            seconds: this.latency / sampleRate
         });
     }
 
@@ -187,18 +273,23 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
         this.history.forEach((buffer) => buffer.fill(0));
         this.delayPos = 0;
         this.historyPos = 0;
+        this.driveRing.fill(this.driveLog);
+        this.drivePos = 0;
+        this.delayedDriveLog = this.driveLog;
         this.dequeHead = 0;
         this.dequeCount = 0;
-        this.minima.fill(1);
-        this.minimaIndex = -1;
-        this.minimaWrite = 0;
-        this.boxSum = 0;
-        this.boxCount = 0;
-        this.boxLength = 0;
+        this.envelopeRing.fill(0);
+        this.averageRing.fill(0);
+        this.ringPos = 0;
+        this.envelopeSum = 0;
+        this.averageSum = 0;
         this.resumCountdown = BOX_RESUM_INTERVAL;
-        this.gain = 1;
-        this.sampleIndex = 0;
+        this.fast = 0;
+        this.slow = 0;
+        this.sustain = 0;
         this.holdCountdown = 0;
+        this.sampleIndex = 0;
+        this.previousBetween = 0;
     }
 
     ensureChannels(channelCount) {
@@ -217,44 +308,36 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
         this.reset();
     }
 
-    // Rebuild the running sum when the user moves the smoothing control.
-    resizeBox(length) {
-        const capacity = this.minima.length;
-        // minimaIndex is negative until the delay line has filled.
-        const available = Math.max(0, Math.min(length, this.minimaIndex + 1));
-
-        this.boxLength = length;
-        this.boxSum = 0;
-        this.boxCount = available;
-
-        let slot = this.minimaWrite;
-        for (let i = 0; i < available; i++) {
-            slot = slot === 0 ? capacity - 1 : slot - 1;
-            this.boxSum += this.minima[slot];
-        }
-    }
-
-    // Recompute the boxcar sum in place, discarding accumulated float drift.
-    resumBox() {
-        const capacity = this.minima.length;
-        let slot = this.minimaWrite;
+    // Sum of the `length` most recent entries of a ring whose next write goes
+    // to `ringPos`.
+    sumRecent(ring, length) {
+        const capacity = this.boxCapacity;
+        let slot = this.ringPos;
         let sum = 0;
-        for (let i = 0; i < this.boxCount; i++) {
+        for (let i = 0; i < length; i++) {
             slot = slot === 0 ? capacity - 1 : slot - 1;
-            sum += this.minima[slot];
+            sum += ring[slot];
         }
-        this.boxSum = sum;
+        return sum;
     }
 
-    runningMinimum(value, index) {
+    // Rebuild both running sums: when the user moves the smoothing control,
+    // and periodically to discard accumulated float drift.
+    rebuildBoxes(length) {
+        this.boxLength = length;
+        this.envelopeSum = this.sumRecent(this.envelopeRing, length);
+        this.averageSum = this.sumRecent(this.averageRing, length);
+    }
+
+    runningMaximum(value, index) {
         const capacity = this.dequeValues.length;
 
-        // Anything already queued that is not smaller than the new value can
-        // never be the window minimum again.
+        // Anything already queued that is not larger than the new value can
+        // never be the window maximum again.
         while (this.dequeCount > 0) {
             let tail = this.dequeHead + this.dequeCount - 1;
             if (tail >= capacity) tail -= capacity;
-            if (this.dequeValues[tail] >= value) this.dequeCount--;
+            if (this.dequeValues[tail] <= value) this.dequeCount--;
             else break;
         }
 
@@ -287,18 +370,45 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
         const ceiling = parameters.ceiling[0];
         const ispEnabled = parameters.isp[0] >= 0.5;
 
-        const releaseSeconds = parameters.release[0];
-        const releaseTauSamples = Math.max(1, (releaseSeconds * sampleRate) / RECOVERY_DECADES);
-        const releaseCoefficient = Math.exp(-1 / releaseTauSamples);
+        // One value per sample while the drive is being automated, otherwise
+        // one for the block. A lone value that differs from the last one used
+        // is ramped to across the block rather than stepped to.
+        const driveValues = parameters.drive;
+        const driveAutomated = driveValues.length > 1;
+        if (!this.driveKnown) {
+            this.drive = driveValues[0];
+            this.driveLog = Math.log(this.drive);
+            this.driveRing.fill(this.driveLog);
+            this.delayedDriveLog = this.driveLog;
+            this.driveKnown = true;
+        }
+        const driveStep = driveAutomated ? 0 : (driveValues[0] - this.drive) / frames;
+        let drive = this.drive;
+        let driveLog = this.driveLog;
+
+        const fastTau = Math.max(1, (parameters.release[0] * sampleRate) / RELEASE_DECADES);
+        const fastCoefficient = Math.exp(-1 / fastTau);
+        const slowStep = SLOW_RELEASE_SLOPE / fastTau;
+        const chargeRate = 1 - Math.exp(-1 / (fastTau * SLOW_CHARGE_RATIO));
         const holdSamples = Math.round(parameters.hold[0] * sampleRate);
 
-        const requestedBox = Math.round(parameters.smoothing[0] * sampleRate);
-        const boxLength = Math.max(1, Math.min(this.lookahead, requestedBox));
-        if (boxLength !== this.boxLength) this.resizeBox(boxLength);
+        // The control is the width of the whole kernel, which is two boxcars
+        // of half that each.
+        const requestedBox = Math.round((parameters.smoothing[0] * sampleRate) / 2);
+        const boxLength = Math.max(1, Math.min(this.boxCapacity, requestedBox));
+        if (boxLength !== this.boxLength) this.rebuildBoxes(boxLength);
 
-        const minimaCapacity = this.minima.length;
+        // A change of drive is answered when the sample it was applied to
+        // comes out, less the delay of the smoothing kernel, so that the
+        // smoothed gain moves when the level does.
+        const driveCapacity = this.driveRing.length;
+        const driveDelay = Math.max(0, this.latency - (boxLength - 1));
+        const driveRing = this.driveRing;
+
+        const boxCapacity = this.boxCapacity;
         const delayLength = this.lookahead;
-        const minima = this.minima;
+        const envelopeRing = this.envelopeRing;
+        const averageRing = this.averageRing;
         const ispCoefficients = this.ispCoefficients;
 
         // Hoisted out of the frame loop: an input can present fewer channels
@@ -309,14 +419,23 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
             // Push into the history ring, twice, so the tap loop below reads a
             // contiguous run. Then take the delayed sample the rest of the
             // algorithm treats as "now".
-            let historyRead = this.historyPos + 1;
+            const historyRead = this.historyPos + 1;
             let peak = 0;
+            let between = 0;
+
+            let nextDrive;
+            if (driveAutomated) nextDrive = driveValues[i];
+            else nextDrive = i === frames - 1 ? driveValues[0] : drive + driveStep;
+            if (nextDrive !== drive && nextDrive > 0) {
+                drive = nextDrive;
+                driveLog = Math.log(drive);
+            }
 
             for (let c = 0; c < channelCount; c++) {
-                let sample = c < sourceChannels ? input[c][i] : 0;
+                let sample = c < sourceChannels ? input[c][i] * drive : 0;
                 // A NaN would never raise `peak` (every comparison against it is
                 // false), so it would sail through at unity gain and then poison
-                // the boxcar sum permanently.
+                // the running sums permanently.
                 if (!(sample === sample)) sample = 0;
 
                 const ring = this.history[c];
@@ -337,63 +456,112 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
                             accumulator += ispCoefficients[base + k] * ring[historyRead + k];
                         }
                         const interpolated = accumulator < 0 ? -accumulator : accumulator;
-                        if (interpolated > peak) peak = interpolated;
+                        if (interpolated > between) between = interpolated;
                     }
                 }
             }
 
             this.historyPos = this.historyPos + 1 === ISP_TAPS ? 0 : this.historyPos + 1;
 
-            const required = peak > ceiling ? ceiling / peak : 1;
-            const minimum = this.runningMinimum(required, this.sampleIndex);
+            // A peak between two samples is shaped by the gain on both of
+            // them, so it counts against the one before it and the one after.
+            if (between > peak) peak = between;
+            if (this.previousBetween > peak) peak = this.previousBetween;
+            this.previousBetween = between;
 
-            const outIndex = this.sampleIndex - delayLength + 1;
-            this.boxSum += minimum;
-            if (this.boxCount < this.boxLength) {
-                this.boxCount++;
-            } else {
-                let evictSlot = this.minimaWrite - this.boxLength;
-                if (evictSlot < 0) evictSlot += minimaCapacity;
-                this.boxSum -= minima[evictSlot];
+            const required = peak > ceiling ? Math.log(peak / ceiling) + GUARD : 0;
+            const maximum = this.runningMaximum(required, this.sampleIndex);
+
+            let fast = this.fast;
+            let slow = this.slow;
+
+            // Hand back what a falling drive no longer needs, from the slow
+            // part first. If that is more than the audio already in the
+            // look-ahead allows, the check against the running maximum below
+            // puts the difference straight back.
+            driveRing[this.drivePos] = driveLog;
+            let driveRead = this.drivePos - driveDelay;
+            if (driveRead < 0) driveRead += driveCapacity;
+            const delayedDriveLog = driveRing[driveRead];
+            this.drivePos = this.drivePos + 1 === driveCapacity ? 0 : this.drivePos + 1;
+            if (delayedDriveLog < this.delayedDriveLog) {
+                slow -= this.delayedDriveLog - delayedDriveLog;
+                if (slow < 0) {
+                    fast += slow;
+                    slow = 0;
+                    if (fast < 0) fast = 0;
+                }
             }
-            minima[this.minimaWrite] = minimum;
-            this.minimaIndex = outIndex;
-            this.minimaWrite = this.minimaWrite + 1 === minimaCapacity ? 0 : this.minimaWrite + 1;
+            this.delayedDriveLog = delayedDriveLog;
+
+            // How much of the recent past the programme has spent over the
+            // ceiling, 0 to 1. It scales the transfer below, so reduction only
+            // moves to the slow part once the need for it has lasted.
+            let sustain = this.sustain;
+            sustain += ((maximum > 0 ? 1 : 0) - sustain) * chargeRate;
+            if (sustain < REDUCTION_SETTLED) sustain = 0;
+            this.sustain = sustain;
+
+            // Reduction the detector is asking for right now moves from the
+            // fast part to the slow part. The sum does not change, only how
+            // quickly it will come back. Reduction that is merely being held
+            // or released after a peak has passed does not move.
+            if (maximum > slow) {
+                let moved = (maximum - slow) * chargeRate * sustain;
+                if (moved > fast) moved = fast;
+                fast -= moved;
+                slow += moved;
+            }
+
+            if (this.holdCountdown > 0) {
+                this.holdCountdown--;
+            } else {
+                fast *= fastCoefficient;
+                if (fast < REDUCTION_SETTLED) fast = 0;
+                slow -= slowStep;
+                if (slow < 0) slow = 0;
+            }
+
+            // The hold restarts whenever the detector still asks for at least
+            // the reduction in place, equality included. A steady tone asks for
+            // exactly the same reduction at every peak; if those peaks did not
+            // restart the hold, the gain would creep up between them and be
+            // pushed back down at each one, which is the within-cycle movement
+            // the hold exists to prevent.
+            const envelope = fast + slow;
+            if (maximum > 0 && maximum >= envelope - HOLD_TOLERANCE) {
+                if (maximum > envelope) fast = maximum - slow;
+                this.holdCountdown = holdSamples;
+            }
+            this.fast = fast;
+            this.slow = slow;
+
+            // Two boxcars in cascade. The slot about to be overwritten is the
+            // oldest in the ring; the one leaving a boxcar of boxLength is
+            // that many writes back.
+            const ringPos = this.ringPos;
+            let evictSlot = ringPos - boxLength;
+            if (evictSlot < 0) evictSlot += boxCapacity;
+
+            const held = fast + slow;
+            this.envelopeSum += held - envelopeRing[evictSlot];
+            envelopeRing[ringPos] = held;
+
+            const average = this.envelopeSum / boxLength;
+            this.averageSum += average - averageRing[evictSlot];
+            averageRing[ringPos] = average;
+
+            this.ringPos = ringPos + 1 === boxCapacity ? 0 : ringPos + 1;
 
             if (--this.resumCountdown <= 0) {
                 this.resumCountdown = BOX_RESUM_INTERVAL;
-                this.resumBox();
+                this.rebuildBoxes(boxLength);
             }
 
-            const smoothed = this.boxSum / this.boxCount;
-
-            // Gain may fall as fast as the envelope demands but only recovers
-            // after the hold, and then along a single exponential toward
-            // unity.
-            let recovered;
-            if (this.holdCountdown > 0) {
-                this.holdCountdown--;
-                recovered = this.gain;
-            } else {
-                recovered = 1 + (this.gain - 1) * releaseCoefficient;
-                if (recovered > 1 - GAIN_SETTLED) recovered = 1;
-            }
-
-            // The hold restarts whenever the envelope still asks for at least
-            // the current reduction, equality included. A steady tone asks for
-            // exactly the same gain at every peak, and with a strict comparison
-            // those peaks did not restart the hold, so the gain crept up
-            // between them and was snapped back down at each one: the same
-            // within-cycle movement the hold exists to prevent.
-            if (smoothed <= recovered) {
-                this.gain = smoothed;
-                this.holdCountdown = holdSamples;
-            } else {
-                this.gain = recovered;
-            }
+            const reduction = this.averageSum / boxLength;
+            const gain = reduction > 0 ? Math.exp(-reduction) : 1;
 
             const readPos = this.delayPos + 1 === delayLength ? 0 : this.delayPos + 1;
-            const gain = this.gain;
             for (let c = 0; c < channelCount; c++) {
                 output[c][i] = this.delay[c][readPos] * gain;
             }
@@ -401,6 +569,9 @@ class BrickwallLimiterProcessor extends AudioWorkletProcessor {
             this.delayPos = readPos;
             this.sampleIndex++;
         }
+
+        this.drive = drive;
+        this.driveLog = driveLog;
 
         return true;
     }

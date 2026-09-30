@@ -119,6 +119,48 @@ function multitone(frequencies, seconds, rate, amplitudePerTone) {
     return out;
 }
 
+// Deterministic noise in -1..1, so a test that uses it measures the same thing
+// on every run.
+function noise(seconds, rate, seed) {
+    const out = new Float32Array(Math.round(seconds * rate));
+    let state = (seed || 1) >>> 0;
+    for (let i = 0; i < out.length; i++) {
+        state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+        out[i] = state / 2147483648 - 1;
+    }
+    return out;
+}
+
+// Dense programme material, normalised to a peak of 1: a sustained chord and
+// a noise floor, a kick on every beat and a noise burst on every off-beat.
+// The hits stand 12 dB or so above the bed, so a limiter driven by this has
+// something to hold down all the time and something to catch twice a beat.
+function drumsOverBed(seconds, rate, beat) {
+    const period = beat || 0.5;
+    const out = new Float32Array(Math.round(seconds * rate));
+    const hiss = noise(seconds, rate, 7);
+    const burst = noise(seconds, rate, 11);
+    let max = 0;
+    for (let i = 0; i < out.length; i++) {
+        const t = i / rate;
+        const bed = 0.12 * (Math.sin(2 * Math.PI * 220 * t)
+            + Math.sin(2 * Math.PI * 277.2 * t + 1)
+            + Math.sin(2 * Math.PI * 329.6 * t + 2)
+            + 0.5 * Math.sin(2 * Math.PI * 880 * t + 0.5))
+            + 0.03 * hiss[i];
+        const tk = t % period;
+        const phase = 2 * Math.PI * (45 * tk + 75 * 0.02 * (1 - Math.exp(-tk / 0.02)));
+        const kick = 0.9 * Math.exp(-tk / 0.09) * Math.sin(phase);
+        const ts = (t + period / 2) % period;
+        const snare = 0.5 * Math.exp(-ts / 0.04) * burst[i];
+        out[i] = bed + kick + snare;
+        const magnitude = out[i] < 0 ? -out[i] : out[i];
+        if (magnitude > max) max = magnitude;
+    }
+    for (let i = 0; i < out.length; i++) out[i] /= max;
+    return out;
+}
+
 function concat(parts) {
     const length = parts.reduce((sum, part) => sum + part.length, 0);
     const out = new Float32Array(length);
@@ -323,6 +365,70 @@ function gainRoughness(gainDb, rate, settleSeconds, cutoffHz) {
     return { maxStepDb: maxStep, modulationDb: count > 0 ? Math.sqrt(sum / count) : NaN };
 }
 
+/**
+ * The reconstructed peak over [from, to): the signal interpolated at 8x with
+ * a 64-tap Hann-windowed sinc. Much longer than the detector inside the
+ * limiter, so it can stand as the reference the detector is judged against.
+ */
+function truePeak(signal, from, to) {
+    const half = 32;
+    const phases = 8;
+    const kernels = [];
+    for (let p = 0; p < phases; p++) {
+        const kernel = new Float64Array(2 * half);
+        for (let k = 0; k < 2 * half; k++) {
+            const d = k - half + 1 - p / phases;
+            const sinc = d === 0 ? 1 : Math.sin(Math.PI * d) / (Math.PI * d);
+            kernel[k] = Math.abs(d) < half ? sinc * (0.5 + 0.5 * Math.cos((Math.PI * d) / half)) : 0;
+        }
+        kernels.push(kernel);
+    }
+    const start = Math.max(from || 0, half);
+    const end = Math.min(to === undefined ? signal.length : to, signal.length - half - 1);
+    let max = 0;
+    for (let i = start; i < end; i++) {
+        for (let p = 0; p < phases; p++) {
+            const kernel = kernels[p];
+            let sum = 0;
+            for (let k = 0; k < 2 * half; k++) sum += kernel[k] * signal[i - half + 1 + k];
+            const magnitude = sum < 0 ? -sum : sum;
+            if (magnitude > max) max = magnitude;
+        }
+    }
+    return max;
+}
+
+/**
+ * Pumping in a per-sample gain trajectory (in dB), ignoring the first
+ * `settleSeconds`. The trajectory is averaged over 100 ms first, which takes
+ * out the dip that catches a transient and is masked by it, and leaves the
+ * movement slow enough to be heard as the level going up and down. Returns
+ * the averaged gain's peak-to-peak swing and its largest rise within 250 ms.
+ */
+function gainPumping(gainDb, rate, settleSeconds) {
+    const window = Math.round(0.1 * rate);
+    const hop = Math.round(0.25 * rate);
+    const from = Math.max(window, Math.round((settleSeconds || 0) * rate));
+    const averaged = [];
+    let sum = 0;
+    for (let i = from - window; i < gainDb.length; i++) {
+        sum += gainDb[i];
+        if (i >= from) {
+            sum -= gainDb[i - window];
+            averaged.push(sum / window);
+        }
+    }
+    let min = Infinity;
+    let max = -Infinity;
+    let rise = 0;
+    for (let i = 0; i < averaged.length; i++) {
+        if (averaged[i] < min) min = averaged[i];
+        if (averaged[i] > max) max = averaged[i];
+        if (i >= hop && averaged[i] - averaged[i - hop] > rise) rise = averaged[i] - averaged[i - hop];
+    }
+    return { swingDb: max - min, riseDb: rise };
+}
+
 function rippleDb(track, fromTime, toTime) {
     const points = track.filter((p) => p.time >= fromTime && p.time < toTime && !isNaN(p.db));
     if (points.length === 0) return NaN;
@@ -344,6 +450,8 @@ module.exports = {
     squareNaive,
     squareBandlimited,
     multitone,
+    noise,
+    drumsOverBed,
     concat,
     stereo,
     peak,
@@ -358,5 +466,7 @@ module.exports = {
     gainTrack,
     timeConstant,
     gainRoughness,
+    truePeak,
+    gainPumping,
     rippleDb
 };

@@ -5,8 +5,8 @@
  *
  * Each test drives a processor with a generated signal (tone, stepped tone,
  * impulse) and checks a property that should hold regardless of tuning: the
- * limiter never exceeds its ceiling, latency is what the node reports, depth 0
- * is transparent, the Time knob actually moves the time constants, and so on.
+ * limiter never exceeds its ceiling and does not pump, latency is what the node
+ * reports, depth 0 is transparent, the Time knob actually moves the time constants, and so on.
  * Measured numbers are printed alongside so tuning changes can be compared.
  */
 
@@ -74,24 +74,212 @@ const CEILING = S.dbToGain(CEILING_DB);
         `${measuredLatency} samples measured, ${reported ? reported.samples : '?'} reported`);
 }
 
+/**
+ * The gain the limiter applied, per sample and in dB. The detector is linked
+ * across channels, so a second channel carrying a small constant comes out as
+ * that constant times the gain, whatever is on the first.
+ */
+function limiterGainDb(processorSet, input, params) {
+    const PROBE = 1e-3;
+    const probe = new Float32Array(input.length).fill(PROBE);
+    const processor = processorSet.create();
+    const latency = processor.port.posted.find((m) => m.type === 'latency').samples;
+    const out = processorSet.run(processor, [input, probe],
+        Object.assign({ ceiling: CEILING }, params || {}));
+    const gain = new Float32Array(input.length);
+    for (let i = 0; i < gain.length; i++) {
+        // Until the probe has reached the output the limiter is at rest.
+        gain[i] = i <= latency ? 0 : S.gainToDb(out[1][i] / PROBE);
+    }
+    return { gainDb: gain, out: out[0], latency };
+}
+
+// Seconds after `fromSeconds` at which the gain first comes back above `db`.
+function timeToRecover(gainDb, fromSeconds, db) {
+    for (let i = Math.round(fromSeconds * RATE); i < gainDb.length; i++) {
+        if (gainDb[i] >= db) return i / RATE - fromSeconds;
+    }
+    return NaN;
+}
+
 {
-    // Release: a 12 dB-over burst then a tone just under the ceiling. The gain
-    // should be back within 1% of unity roughly `release` seconds after the
-    // burst ends, at every release setting. The control is defined as the
-    // time to 99% recovery, so a wide tolerance around 1.0x is the check.
+    // A lone transient, 12 dB over on a quiet bed, comes back on the fast
+    // release: 90% of the way, in dB, one hold plus one Release after it.
+    const HOLD = 0.02;
     [0.05, 0.12, 0.5, 1.0].forEach((release) => {
-        const input = S.steppedTone(1000, RATE, [
-            { db: -20.3, until: 0.2 },
-            { db: 11.7, until: 0.7 },
-            { db: -20.3, until: 0.7 + release * 2 + 0.5 }
-        ]);
-        const out = limiter.run(limiter.create(), S.stereo(input), { ceiling: CEILING, release })[0];
-        const track = S.gainTrack(input, out, RATE, 0.001);
-        const settled = track.find((p) => p.time > 0.7 + 0.01 && p.db > -0.1);
-        const recovered = settled ? settled.time - 0.7 : NaN;
-        check(`release ${release}s recovers in about that time`, isFinite(recovered) && recovered > release * 0.5 && recovered < release * 1.5,
-            `99% recovery after ${fmt(recovered, 3)} s`);
+        const input = S.tone(1000, 1.5 + release * 3, RATE, S.dbToGain(-20.3));
+        const at = Math.round(0.5 * RATE);
+        for (let i = 0; i < 48; i++) {
+            input[at + i] += S.dbToGain(11.7) * Math.sin((Math.PI * i) / 48)
+                * Math.sin((2 * Math.PI * 3000 * i) / RATE);
+        }
+        const { gainDb } = limiterGainDb(limiter, input, { release, hold: HOLD });
+        let dip = 0;
+        for (let i = at; i < at + RATE * 0.05; i++) if (gainDb[i] < dip) dip = gainDb[i];
+        const recovered = timeToRecover(gainDb, 0.5 + 0.002, dip * 0.1);
+        const expected = HOLD + release;
+        check(`release ${release}s: a lone transient recovers in about that time`,
+            dip < -10 && isFinite(recovered) && recovered > expected * 0.7 && recovered < expected * 1.4,
+            `dip ${fmt(dip, 1)} dB, 90% back after ${fmt(recovered, 3)} s`);
     });
+}
+
+{
+    // Sustained reduction does not come back on the fast release. After a
+    // second at 12 dB over, the gain a quarter of a second later has barely
+    // moved, and the whole recovery is a slope of a few dB per second.
+    const recoveries = [0.04, 0.08].map((release) => {
+        const input = S.steppedTone(1000, RATE, [
+            { db: -20.3, until: 0.5 },
+            { db: 11.7, until: 1.5 },
+            { db: -20.3, until: 9 }
+        ]);
+        const { gainDb } = limiterGainDb(limiter, input, { release });
+        return {
+            release,
+            held: gainDb[Math.round(1.4 * RATE)],
+            soon: gainDb[Math.round(1.75 * RATE)],
+            seconds: timeToRecover(gainDb, 1.5, -0.1)
+        };
+    });
+    const stock = recoveries[1];
+    check('sustained limiting: no swell when the programme drops',
+        stock.held < -11.5 && stock.soon - stock.held < 1.5,
+        `${fmt(stock.held, 2)} dB held, ${fmt(stock.soon, 2)} dB a quarter of a second after`);
+    check('sustained limiting: 12 dB comes back in a few seconds',
+        stock.seconds > 2 && stock.seconds < 6,
+        `within 0.1 dB of unity after ${fmt(stock.seconds, 2)} s`);
+    const ratio = stock.seconds / recoveries[0].seconds;
+    check('the Release control scales the slow recovery too', ratio > 1.6 && ratio < 2.4,
+        `${fmt(recoveries[0].seconds, 2)} s at 40 ms, ${fmt(stock.seconds, 2)} s at 80 ms`);
+}
+
+{
+    // Dense material driven hard, which is where a limiter pumps: every hit
+    // pushes the gain down and the sustained material swells back up behind
+    // it. Bounded here are that swell, measured on the gain averaged over
+    // 100 ms, and the roughness of the gain from one sample to the next.
+    const programme = S.drumsOverBed(8, RATE);
+    [12, 24].forEach((driveDb) => {
+        const input = Float32Array.from(programme, (v) => v * S.dbToGain(CEILING_DB + driveDb));
+        const { gainDb, out } = limiterGainDb(limiter, input);
+        const pumping = S.gainPumping(gainDb, RATE, 4);
+        const roughness = S.gainRoughness(gainDb, RATE, 4);
+        check(`dense programme ${driveDb} dB over: ceiling holds and the gain does not pump`,
+            S.peak(out) <= CEILING * (1 + 1e-4) && !S.hasNonFinite(out)
+                && pumping.riseDb < 3 && pumping.swingDb < 4 && roughness.maxStepDb < 0.08,
+            `swing ${fmt(pumping.swingDb)} dB, rise ${fmt(pumping.riseDb)} dB in 250 ms, `
+                + `max ${fmt(roughness.maxStepDb, 3)} dB/sample`);
+    });
+}
+
+{
+    // The attack is an S-curve across the whole look-ahead. A lone click
+    // 24 dB over is the steepest thing it has to draw.
+    const input = S.impulse(0.4, RATE, CEILING * S.dbToGain(24), 0.1);
+    const { gainDb, out } = limiterGainDb(limiter, input);
+    const roughness = S.gainRoughness(gainDb, RATE, 0.01);
+    let dip = 0;
+    for (let i = 0; i < gainDb.length; i++) if (gainDb[i] < dip) dip = gainDb[i];
+    check('a 24 dB click is met with a smooth gain curve',
+        S.peak(out) <= CEILING * (1 + 1e-4) && dip < -23.9 && roughness.maxStepDb < 0.25,
+        `dip ${fmt(dip, 1)} dB, max ${fmt(roughness.maxStepDb, 3)} dB/sample`);
+}
+
+{
+    // Moving the smoothing control rebuilds the running sums while the
+    // envelope is in flight. The ceiling must survive that at any setting.
+    const programme = S.drumsOverBed(3, RATE);
+    const input = Float32Array.from(programme, (v) => v * S.dbToGain(CEILING_DB + 18));
+    let state = 1;
+    const smoothing = () => {
+        state = (Math.imul(state, 1103515245) + 12345) >>> 0;
+        return 0.0002 + (state / 4294967296) * 0.0048;
+    };
+    const out = limiter.run(limiter.create(), S.stereo(input), { ceiling: CEILING, smoothing })[0];
+    check('ceiling holds while the smoothing control is moved', S.peak(out) <= CEILING * (1 + 1e-4) && !S.hasNonFinite(out),
+        `peak ${fmt(S.gainToDb(S.peak(out)), 3)} dBFS`);
+}
+
+{
+    // The drive is plain gain while nothing is over the ceiling.
+    const input = S.tone(1000, 0.5, RATE, S.dbToGain(CEILING_DB - 12));
+    const out = limiter.run(limiter.create(), S.stereo(input), { ceiling: CEILING, drive: S.dbToGain(6) })[0];
+    const gain = S.gainToDb(S.rms(out, RATE / 4) / S.rms(input, RATE / 4));
+    check('drive of 6 dB below the ceiling is 6 dB of gain', Math.abs(gain - 6) < 0.01, `${fmt(gain, 3)} dB`);
+}
+
+{
+    // Turning the drive down while the limiter is deep in sustained
+    // reduction. The reduction the drive was responsible for has to go with
+    // it; left to the slow release, the output would drop by the full 12 dB
+    // and take seconds to come back. Compared against the same programme
+    // at the lower drive throughout, quarter of a second by quarter.
+    const programme = Float32Array.from(S.drumsOverBed(10, RATE), (v) => v * CEILING);
+    const high = S.dbToGain(24);
+    const low = S.dbToGain(12);
+    const drive = (start) => {
+        const t = start / RATE - 6;
+        return t < 0 ? high : low + (high - low) * Math.exp(-t / 0.02);
+    };
+    const moved = limiter.run(limiter.create(), S.stereo(programme), { ceiling: CEILING, drive })[0];
+    const steady = limiter.run(limiter.create(), S.stereo(programme), { ceiling: CEILING, drive: low })[0];
+    let worst = 0;
+    for (let t = 6; t < 8; t += 0.25) {
+        const from = Math.round(t * RATE);
+        const to = from + Math.round(0.25 * RATE);
+        const difference = S.gainToDb(S.rms(moved, from, to) / S.rms(steady, from, to));
+        if (Math.abs(difference) > Math.abs(worst)) worst = difference;
+    }
+    check('turning the drive down 12 dB does not leave the output quiet',
+        S.peak(moved) <= CEILING * (1 + 1e-4) && !S.hasNonFinite(moved) && Math.abs(worst) < 1,
+        `worst ${fmt(worst, 2)} dB against the lower drive held throughout`);
+}
+
+{
+    // The ceiling under a drive that never stops moving, up and down.
+    const programme = Float32Array.from(S.drumsOverBed(4, RATE), (v) => v * CEILING);
+    const drive = (start) => S.dbToGain(12 + 12 * Math.sin((2 * Math.PI * 3 * start) / RATE));
+    const out = limiter.run(limiter.create(), S.stereo(programme), { ceiling: CEILING, drive })[0];
+    check('ceiling holds while the drive is moved', S.peak(out) <= CEILING * (1 + 1e-4) && !S.hasNonFinite(out),
+        `peak ${fmt(S.gainToDb(S.peak(out)), 3)} dBFS`);
+}
+
+{
+    // Same guarantee and the same latency report at 44.1 kHz, where the
+    // look-ahead is an odd number of samples.
+    const limiter441 = loadProcessor('content/limiter-processor.js', 44100);
+    const input = S.concat([
+        S.impulse(0.2, 44100, S.dbToGain(11.7), 0.1),
+        Float32Array.from(S.drumsOverBed(2, 44100), (v) => v * S.dbToGain(CEILING_DB + 18))
+    ]);
+    const processor = limiter441.create();
+    const reported = processor.port.posted.find((m) => m.type === 'latency');
+    const out = limiter441.run(processor, S.stereo(input), { ceiling: CEILING })[0];
+    let argmax = 0;
+    for (let i = 0; i < 0.2 * 44100; i++) if (Math.abs(out[i]) > Math.abs(out[argmax])) argmax = i;
+    check('44.1 kHz: ceiling holds and latency matches the report',
+        S.peak(out) <= CEILING * (1 + 1e-4) && !S.hasNonFinite(out)
+            && argmax - Math.round(0.1 * 44100) === reported.samples,
+        `peak ${fmt(S.gainToDb(S.peak(out)), 3)} dBFS, ${reported.samples} samples`);
+}
+
+{
+    // A tone at a quarter of the sample rate, sampled 45 degrees off its
+    // crests: every sample reads 3 dB under the peak the waveform actually
+    // reaches. With ISP on, the reconstructed output has to stay under the
+    // ceiling, not just the samples.
+    const input = new Float32Array(RATE);
+    for (let i = 0; i < input.length; i++) {
+        input[i] = S.dbToGain(CEILING_DB + 12) * Math.sin((Math.PI * i) / 2 + Math.PI / 4);
+    }
+    const on = limiter.run(limiter.create(), S.stereo(input), { ceiling: CEILING, isp: 1 })[0];
+    const off = limiter.run(limiter.create(), S.stereo(input), { ceiling: CEILING, isp: 0 })[0];
+    const onPeak = S.truePeak(on, RATE / 2, RATE / 2 + 4800);
+    const offPeak = S.truePeak(off, RATE / 2, RATE / 2 + 4800);
+    check('ISP holds the reconstructed peak of an off-crest tone under the ceiling',
+        onPeak <= CEILING * (1 + 1e-3),
+        `true peak ${fmt(S.gainToDb(onPeak), 3)} dBFS with ISP, ${fmt(S.gainToDb(offPeak), 3)} dBFS without`);
 }
 
 {
@@ -504,15 +692,24 @@ console.log('\n== Settings ==');
         swapped.ottLowCrossHz === 300 && swapped.ottHighCrossHz === 8000,
         `${swapped.ottLowCrossHz} / ${swapped.ottHighCrossHz} Hz`);
 
+    const current = settings.SETTINGS_VERSION;
+
     const nudged = settings.migrateStored({ settingsVersion: 3, ottDepth: 1, ottHighCrossHz: 2500 });
     check('migration 3 -> 4 nudges values still at the old defaults',
-        nudged.ottDepth === 0.5 && nudged.ottHighCrossHz === 5000 && nudged.settingsVersion === 4,
+        nudged.ottDepth === 0.5 && nudged.ottHighCrossHz === 5000 && nudged.settingsVersion === current,
         JSON.stringify(nudged));
 
     const kept = settings.migrateStored({ settingsVersion: 3, ottDepth: 0.9, ottHighCrossHz: 2600 });
     check('migration 3 -> 4 leaves deliberate values alone',
-        kept.ottDepth === undefined && kept.ottHighCrossHz === undefined && kept.settingsVersion === 4,
+        kept.ottDepth === undefined && kept.ottHighCrossHz === undefined && kept.settingsVersion === current,
         JSON.stringify(kept));
+
+    const widened = settings.migrateStored({ settingsVersion: 4, limiterAttackMs: 2.5 });
+    const narrow = settings.migrateStored({ settingsVersion: 4, limiterAttackMs: 1 });
+    check('migration 4 -> 5 moves the limiter attack only from its old default',
+        widened.limiterAttackMs === 5 && narrow.limiterAttackMs === undefined
+            && widened.settingsVersion === 5 && narrow.settingsVersion === 5,
+        `${JSON.stringify(widened)} / ${JSON.stringify(narrow)}`);
 }
 
 console.log(`\n${passes} passed, ${failures} failed`);

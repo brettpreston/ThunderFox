@@ -73,7 +73,7 @@ var ThunderFoxSettings = (function() {
         // is opt-in.
         ottLinearPhase: false,
 
-        limiterAttackMs: 2.5,
+        limiterAttackMs: 5,
         limiterReleaseMs: 80,
         limiterHoldMs: 20,
         limiterCeilingDb: -0.3,
@@ -119,7 +119,7 @@ var ThunderFoxSettings = (function() {
     // Stored values silently override DEFAULTS, so without this a changed
     // default only ever reaches fresh installs. Storage that predates the key
     // is version 0.
-    const SETTINGS_VERSION = 4;
+    const SETTINGS_VERSION = 5;
 
     function clamp(value, min, max) {
         return Math.max(min, Math.min(max, value));
@@ -183,6 +183,14 @@ var ThunderFoxSettings = (function() {
             const patch = {};
             if (stored.ottDepth === 1) patch.ottDepth = DEFAULTS.ottDepth;
             if (stored.ottHighCrossHz === 2500) patch.ottHighCrossHz = DEFAULTS.ottHighCrossHz;
+            return patch;
+        },
+        // 4 -> 5: the limiter's smoothing became a triangular kernel and its
+        // default width moved from 2.5 ms to the full 5 ms look-ahead, which
+        // is the smoothest gain curve the look-ahead allows.
+        (stored) => {
+            const patch = {};
+            if (stored.limiterAttackMs === 2.5) patch.limiterAttackMs = DEFAULTS.limiterAttackMs;
             return patch;
         }
     ];

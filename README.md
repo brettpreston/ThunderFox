@@ -10,6 +10,7 @@ The processing has three stages: an OTT-style multiband compressor, a graphic eq
 - OTT's controls: **Depth**, **Mix**, **Attack**, **Release**, global **Upward**/**Downward**, plus per-band Up, Down and Gain, with the stock preset at half depth as the defaults.
 - An optional **linear-phase** band split: complementary FIR pairs that sum to a pure delay, for zero phase rotation at the crossovers, at the cost of about 11 ms of latency and more CPU.
 - A true look-ahead brickwall limiter in an AudioWorklet: no clipping, no saturation, no waveshaping. Material below the ceiling passes through untouched.
+- A **program-dependent release** in the limiter: transients recover in milliseconds, sustained limiting recovers over seconds, so driving it hard does not pump.
 - **Inter-sample peak (true peak) detection** in the limiter, so the output does not overshoot 0 dBFS once a downstream resampler or codec reconstructs it.
 - A single Loudness macro that drives multiband depth and limiter drive together.
 - 8-band equaliser with shelves at the extremes and a live response curve.
@@ -26,8 +27,7 @@ media element(s)
   -> OTT worklet: LR4 (or linear-phase FIR) crossover -> per band { downward + upward comp, makeup, band gain }
   -> highpass (optional)
   -> 8-band EQ (optional)
-  -> drive (Loudness macro, 0 to +24 dB)
-  -> look-ahead brickwall limiter (AudioWorklet, 5 ms, true-peak)
+  -> limiter worklet: drive (Loudness macro, 0 to +24 dB) -> look-ahead brickwall limiter (5 ms, true-peak)
   -> destination
 ```
 
@@ -37,7 +37,7 @@ Three properties of this chain matter:
 
 - **All makeup gain is upstream of the limiter.** Nothing adds level after the limiting stage. Loudness is raised by driving the limiter harder, never by amplifying its output.
 - **The crossover sums flat.** The three bands reconstruct to within 0.001 dB from 20 Hz to 19 kHz, so there is no empirical band trim anywhere in the code.
-- **The limiter is transparent, not a clipper.** It delays the signal and computes the gain envelope from samples that have not played yet, so peaks are handled by a smooth gain curve rather than by reshaping the waveform.
+- **The limiter is transparent, not a clipper.** It delays the signal and computes the gain envelope from samples that have not played yet, so peaks are handled by a smooth gain curve rather than by reshaping the waveform. Under sustained drive that curve follows the programme's level, not its individual peaks.
 
 **Depth scales the compression ratios; Mix is a per-band dry/wet blend.** Both are safe against comb filtering because the blend happens *inside* each band, between the band signal and its own gain-scaled self — the two paths are sample-aligned by construction. Do not add a dry path around the whole chain: the limiter's look-ahead delays the wet path, and an undelayed dry sum would comb.
 
@@ -112,8 +112,8 @@ The Advanced section is off by default. While it is off, the built-in defaults a
 | Lin. phase | on/off | off | Linear-phase FIR band split (adds latency and CPU) |
 | Up / Down | 0-100% | OTT preset | Per-band ratio of each compression direction |
 | Gain | ±30 dB | +16.3 / +11.7 / +16.3 dB | Per-band output gain (OTT's makeup), scaled by Depth |
-| Attack (limiter) | 0.2-5 ms | 2.5 ms | Limiter gain-envelope smoothing |
-| Release (limiter) | 10-1000 ms | 80 ms | Limiter gain recovery |
+| Attack (limiter) | 0.2-5 ms | 5 ms | Limiter gain-envelope smoothing |
+| Release (limiter) | 10-1000 ms | 80 ms | Limiter recovery after a transient; scales the slow recovery too |
 | Hold | 0-50 ms | 20 ms | Delay before the limiter starts recovering |
 | Ceiling | −3 to 0 dB | −0.3 dB | Limiter output ceiling |
 | True peak | on/off | on | Inter-sample peak detection |
@@ -122,11 +122,15 @@ The Advanced section is off by default. While it is off, the built-in defaults a
 
 **Up and Down** are the per-band ratios. At 100% Down with full Depth a band is pinned to its upper threshold; smaller values are gentler. The stock preset is 80% Up on every band and 90/85.7/100% Down.
 
-**Attack (limiter)** is the width of the limiter's gain smoothing, not a conventional attack time. A look-ahead limiter has no attack in the usual sense, because the gain is already in position when the peak arrives; what this sets is how gradually it gets there. It is capped at the worklet's 5 ms look-ahead, since the envelope cannot be smoothed over more samples than it can see.
+**Attack (limiter)** is the width of the limiter's gain smoothing, not a conventional attack time. A look-ahead limiter has no attack in the usual sense, because the gain is already in position when the peak arrives; what this sets is how gradually it gets there. The smoothing is a triangular window, so the gain moves along an S-curve with no corner at either end, and it is applied after the release, so the start of a recovery is rounded the same way. It is capped at the worklet's 5 ms look-ahead, since the envelope cannot be smoothed over more samples than it can see. The default is the full 5 ms, the smoothest curve available; shorter settings leave the gain untouched until closer to the peak, at the cost of a steeper curve.
 
-**Release (limiter)** is the time to recover 99% of the gain reduction, not one time constant. Recovery is a single exponential toward unity: a 100 ms release reaches 99% of the way back in about 100 ms, and there is no stage switch to hear.
+**Release (limiter)** is program-dependent. The limiter keeps its gain reduction in two parts. A new peak goes into the fast part, which recovers exponentially in decibels; Release is the time that takes to give back 90% of a transient's reduction, once the hold has run out. Reduction the programme keeps asking for moves across to the slow part, which recovers along a straight line in decibels: about 3 dB per second at the default, in proportion to the Release setting (half the Release, twice the slope). How readily reduction moves across depends on how long the programme has been over the ceiling, so a lone click comes back entirely on the fast release, while dense material driven hard ends up almost entirely in the slow part. The result is that the gain rides the level of the programme instead of chasing each peak, and the harder the limiter is driven the longer its effective release becomes. There is no switch between the two rates to hear, only a transfer between two continuous quantities.
 
-**Hold** keeps the gain where it is for that long after the envelope last asked for it, and restarts each time it asks again. The 20 ms default covers one half-cycle down to 25 Hz, which is what keeps a driven limiter from modulating bass within the cycle.
+The drive is applied inside the limiter worklet, not by a gain node in front of it, so the limiter knows when it changes. When Loudness is turned down, the reduction the drive was responsible for is handed back in step with it; left to the slow release, the output would drop away and take seconds to come back.
+
+The trade is loudness for transparency. A limiter that lets go of every peak within 100 ms is a few dB louder on dense material, and what it adds is the swell between the peaks. To get closer to that, lower Release.
+
+**Hold** keeps the gain where it is for that long after the detector last asked for it, and restarts each time it asks again. Both parts of the release wait for it. The 20 ms default covers one half-cycle down to 25 Hz, which is what keeps a driven limiter from modulating bass within the cycle.
 
 **In gain** sits before the crossover, so it drives the compressors harder rather than just making things louder.
 
@@ -147,7 +151,8 @@ The time and frequency sliders are logarithmic, because a linear control across 
 ## Tuning guidance
 
 - If output is overly compressed or pumping, lower "Loudness", or raise "Release" under Advanced to slow the bands down.
-- If transients sound dulled, lower "Attack"; if they sound spiky, raise the limiter "Attack".
+- If the level audibly rises after loud moments, raise the limiter "Release"; if quiet passages take too long to come back up after loud ones, lower it.
+- If transients sound dulled, lower "Attack".
 - For less bass movement specifically, lower the low band's "Down" rather than changing anything global.
 - For the classic OTT squash, raise "Loudness"; for gentler glue, lower "Depth" or "Mix".
 
@@ -161,13 +166,13 @@ The time and frequency sliders are logarithmic, because a linear control across 
 
 ## Development notes
 
-- **Offline DSP tests: `npm test`** (or `node tests/run.js`, no dependencies). `tests/harness.js` evaluates the two worklet files in a `vm` context with `AudioWorkletProcessor`, `registerProcessor` and `sampleRate` shimmed, so the file the extension ships is what runs. `tests/signals.js` has tone, stepped-tone, impulse, pulse-wave (naive and band-limited) and Schroeder-phased multitone generators, plus peak, RMS, Goertzel THD, gain-trajectory, worst-spur, magnitude-response and notch-depth measurements. The tests check the limiter's ceiling on tones and impulses, that measured latency equals the reported latency, that each Release setting recovers in about that time, distortion on driven bass, OTT flatness at depth 0, the OTT transfer curve (quiet up, loud down, range compressed), that the Attack and Release knobs move the envelope times, and steady-tone distortion per band. High-frequency alias spurs are bounded at −78 dBc at both 48 and 44.1 kHz — the spur metric is a guarded max (skipping a band around every harmonic) rather than an integral, because the upward stage legitimately puts a broad masked AM skirt around the carrier while the audible defect is a discrete folded tone. A multitone response check proves the crossover neither tilts at depth 0 nor combs at depth 1, the linear-phase mode is verified to sum to a pure delay, and the settings migration and crossover ordering have tests of their own. Measured values are printed next to each result so tuning changes can be compared.
+- **Offline DSP tests: `npm test`** (or `node tests/run.js`, no dependencies). `tests/harness.js` evaluates the two worklet files in a `vm` context with `AudioWorkletProcessor`, `registerProcessor` and `sampleRate` shimmed, so the file the extension ships is what runs. `tests/signals.js` has tone, stepped-tone, impulse, pulse-wave (naive and band-limited) and Schroeder-phased multitone generators, deterministic noise and a drums-over-a-bed programme, plus peak, true-peak, RMS, Goertzel THD, gain-trajectory, gain-pumping, worst-spur, magnitude-response and notch-depth measurements. The tests check the limiter's ceiling on tones, impulses and dense material at 48 and 44.1 kHz and while the smoothing and drive controls are moved, that turning the drive down does not leave the output quiet, the reconstructed (true) peak with ISP on, that measured latency equals the reported latency, that a lone transient recovers in about the Release time while sustained limiting recovers over seconds, that the gain neither pumps nor steps on dense material driven 12 and 24 dB over, distortion on driven bass, OTT flatness at depth 0, the OTT transfer curve (quiet up, loud down, range compressed), that the Attack and Release knobs move the envelope times, and steady-tone distortion per band. High-frequency alias spurs are bounded at −78 dBc at both 48 and 44.1 kHz — the spur metric is a guarded max (skipping a band around every harmonic) rather than an integral, because the upward stage legitimately puts a broad masked AM skirt around the carrier while the audible defect is a discrete folded tone. A multitone response check proves the crossover neither tilts at depth 0 nor combs at depth 1, the linear-phase mode is verified to sum to a pure delay, and the settings migration and crossover ordering have tests of their own. Measured values are printed next to each result so tuning changes can be compared.
 
-- **Both worklets or neither.** If either AudioWorklet module fails to load, `buildAudioContext()` closes the context and throws, and the page plays natively. A partially built chain — drive with no limiter behind it — is worse than not processing at all.
+- **Both worklets or neither.** If either AudioWorklet module fails to load, `buildAudioContext()` closes the context and throws, and the page plays natively. A partially built chain — multiband makeup with no limiter behind it — is worse than not processing at all.
 - **The limiter has to be an AudioWorklet.** Look-ahead means reading samples before they play, which no built-in node can do. `DynamicsCompressorNode` has no look-ahead so it always overshoots, and a `WaveShaper` bounds the output only by reshaping the waveform, which is distortion by definition.
-- The limiter's guarantee is structural, and [content/limiter-processor.js](content/limiter-processor.js) carries the proof in its header comment: the gain applied to any sample is an average of running minima whose windows all contain that sample, so it can never exceed what that sample required. Anything added to the gain path must only ever *lower* the gain.
+- The limiter's guarantee is structural, and [content/limiter-processor.js](content/limiter-processor.js) carries the proof in its header comment: the reduction applied to any sample is a weighted average of envelope values, each of which is at least a running maximum whose window contains that sample, so it can never be less than what that sample required. The release lives inside that bound: anything added to the gain path must only ever *lower* the gain.
 - `LOOKAHEAD_SECONDS` is fixed on purpose. Changing it while audio is running would resize the delay line and click, so the user-facing timing control adjusts the smoothing width within that window instead. The true-peak history delay is applied whether or not ISP is enabled, for the same reason.
-- **Structural worklet parameters must be stepped, not ramped.** `setTargetAtTime` on the limiter's `smoothing` makes it a different integer on nearly every render quantum, and each change rebuilds the boxcar sum on the audio thread. `setParam()` exists for these; `rampParam()` is for everything else.
+- **Structural worklet parameters must be stepped, not ramped.** `setTargetAtTime` on the limiter's `smoothing` makes it a different integer on nearly every render quantum, and each change rebuilds the smoothing sums on the audio thread. `setParam()` exists for these; `rampParam()` is for everything else.
 - **Do not delete entries from `STATE.mediaNodes`.** A `MediaElementAudioSourceNode` binds to its element permanently and cannot be recreated; a second `createMediaElementSource()` on the same element throws. Removal from the DOM disconnects, it does not forget. Dropping the entry is what used to mute an element for good the moment a framework re-rendered it.
 - **`MutationObserver` removals are processed before additions.** A remove-then-append in one task produces two records, and handling the addition first leaves the element detached from the graph it was just reconnected to.
 - Settings are applied by comparing against the last applied value (`STATE.applied`). The popup both writes storage and messages the tab, so every change arrives twice; without the comparison the second arrival's `cancelScheduledValues` cuts the first ramp short.

@@ -111,8 +111,8 @@
         const ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
 
         try {
-            // Both worklets or neither. A half-built chain — drive with no
-            // limiter behind it, say — is worse than not processing at all.
+            // Both worklets or neither. A half-built chain — multiband makeup
+            // with no limiter behind it, say — is worse than not processing at all.
             await ctx.audioWorklet.addModule(browser.runtime.getURL(OTT_WORKLET_PATH));
             await ctx.audioWorklet.addModule(browser.runtime.getURL(LIMITER_WORKLET_PATH));
         } catch (error) {
@@ -215,19 +215,21 @@
     function createLimiter(ctx) {
         const input = ctx.createGain();
 
-        // Drive sits ahead of the limiter, so raising Loudness pushes signal
-        // into a fixed ceiling rather than adding gain after the only stage
-        // protecting the output. This is the classic limiter threshold control: lowering
-        // the threshold and making up the difference is the same operation.
-        const drive = ctx.createGain();
-
         const node = new AudioWorkletNode(ctx, LIMITER_WORKLET_NAME, {
             numberOfInputs: 1,
             numberOfOutputs: 1
         });
 
-        input.connect(drive);
-        drive.connect(node);
+        input.connect(node);
+
+        // Drive sits ahead of the limiter, so raising Loudness pushes signal
+        // into a fixed ceiling rather than adding gain after the only stage
+        // protecting the output. This is the classic limiter threshold control: lowering
+        // the threshold and making up the difference is the same operation.
+        // It is a parameter of the worklet rather than a gain node in front
+        // of it, so the limiter can let go of reduction as the drive comes
+        // down instead of leaving that to its slow release.
+        const drive = node.parameters.get('drive');
 
         return { input, output: node, drive, node, parameters: node.parameters };
     }
@@ -808,7 +810,7 @@
         const changed = (key) => force || applied[key] !== targets[key];
 
         if (changed('preGain')) rampParam(STATE.preGain.gain, targets.preGain);
-        if (changed('drive')) rampParam(STATE.limiter.drive.gain, targets.drive);
+        if (changed('drive')) rampParam(STATE.limiter.drive, targets.drive);
 
         const ott = STATE.ott.parameters;
         ['depth', 'mix', 'attack', 'release', 'upward', 'downward',
